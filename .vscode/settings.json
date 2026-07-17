@@ -1,0 +1,10 @@
+{
+    "terminal.integrated.env.linux": {
+        "PYTHONPATH": "${workspaceFolder}:${env:PYTHONPATH}"
+    },
+    "terminal.integrated.cwd": "${workspaceFolder}",
+    "python.analysis.extraPaths": [
+        "${workspaceFolder}"
+    ],
+    "python.terminal.executeInFileDir": false
+}
