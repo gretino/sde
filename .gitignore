@@ -7,9 +7,10 @@ CONTEXT.md
 cache/
 verification_results/
 wandb/
+checkpoints/
+*.pt
 # C extensions
 *.so
-
 # Distribution / packaging
 .Python
 build/
