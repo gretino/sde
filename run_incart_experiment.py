@@ -1,5 +1,6 @@
 import os
 import argparse
+import yaml
 import random
 import numpy as np
 import torch
@@ -102,7 +103,23 @@ def collate_fn(batch):
 def main():
     load_dotenv()
     
+    # 1. Pre-parse configuration file argument
+    temp_parser = argparse.ArgumentParser(add_help=False)
+    temp_parser.add_argument("--config", type=str, default="config.yaml", help="Path to config YAML file")
+    temp_args, _ = temp_parser.parse_known_args()
+    
+    config_defaults = {}
+    if os.path.exists(temp_args.config):
+        try:
+            with open(temp_args.config, "r") as f:
+                config_defaults = yaml.safe_load(f)
+            print(f"Loaded training parameters from config: {temp_args.config}")
+        except Exception as e:
+            print(f"Warning: Failed to load config from {temp_args.config}: {e}")
+            
+    # 2. Main parser
     parser = argparse.ArgumentParser(description="Train and evaluate Neuro SDE on INCART 12-lead ECG dataset.")
+    parser.add_argument("--config", type=str, default="config.yaml", help="Path to config YAML file")
     parser.add_argument("--db-dir", type=str, default="/home/qfbqt/8TB/datasets/physionet.org/files/incartdb/1.0.0", help="Path to database directory")
     parser.add_argument("--weight-path", type=str, default=None, help="Path to mimic_iv_ecg_finetuned.pt weight file")
     parser.add_argument("--epochs", type=int, default=5, help="Number of training epochs")
@@ -111,12 +128,16 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="Run a quick single step check")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
     parser.add_argument("--save-dir", type=str, default="checkpoints", help="Directory to save checkpoints")
+    parser.add_argument("--wandb-run-name", type=str, default="incart-epoch5", help="Weights & Biases run name")
+    
+    # Set default values from config file if present
+    parser.set_defaults(**config_defaults)
     args = parser.parse_args()
     
     set_seed(args.seed)
     
-    # Initialize wandb
-    wandb.init(project="sde", config=vars(args))
+    # Initialize wandb using the config run name (defaults to "incart-epoch5")
+    wandb.init(project="sde", config=vars(args), name=args.wandb_run_name)
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
@@ -206,7 +227,10 @@ def main():
             
             loss_ae = 0.5 * (loss_recon_context + loss_recon_target)
             
-            loss = loss_latent + loss_waveform + loss_ae
+            # Weighted loss balancing: scale down waveform and autoencoder terms to match latent scale
+            w_waveform = 0.05
+            w_ae = 0.05
+            loss = loss_latent + w_waveform * loss_waveform + w_ae * loss_ae
             loss.backward()
             optimizer.step()
             
