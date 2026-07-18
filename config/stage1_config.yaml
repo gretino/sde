@@ -1,0 +1,16 @@
+db_dir: "/home/qfbqt/8TB/datasets/physionet.org/files/incartdb/1.0.0"
+weight_path: null
+epochs: 5
+batch_size: 128
+lr: 0.0003
+dry_run: false
+seed: 42
+save_dir: "checkpoints/stage1"
+wandb_run_name: "incart-stage1-align"
+decoder_hidden_dim: 256
+latent_dim: 32
+pretrained_ae_path: "checkpoints/pretrained_autoencoder.pt"
+w_waveform: 0.0
+w_ae: 0.0
+ae_lr: 0
+ae_encoder_lr: 0

@@ -35,6 +35,8 @@ class IncartDataset(Dataset):
             
         self.signals = {}
         self.annotations = {}
+        self.record_means = {}
+        self.record_stds = {}
         
         # Load and preprocess all records
         for rec in self.record_names:
@@ -66,28 +68,33 @@ class IncartDataset(Dataset):
         if self.use_cache and os.path.exists(cache_path) and os.path.exists(ann_cache_path):
             self.signals[rec] = torch.load(cache_path)
             self.annotations[rec] = torch.load(ann_cache_path)
-            return
+        else:
+            rec_path = os.path.join(self.db_dir, rec)
+            record = wfdb.rdrecord(rec_path)
             
-        rec_path = os.path.join(self.db_dir, rec)
-        record = wfdb.rdrecord(rec_path)
-        
-        raw_signal = torch.tensor(record.p_signal, dtype=torch.float32)
-        original_sr = record.fs
-        
-        # Clean and resample using preprocessing module
-        clean_signal, _ = preprocess_ecg(raw_signal, original_sr, self.target_sr)
-        
-        # Load annotations and rescale R-peak samples to target_sr
-        ann = wfdb.rdann(rec_path, "atr")
-        ann_samples_original = torch.tensor(ann.sample, dtype=torch.float32)
-        ann_samples_target = (ann_samples_original * (self.target_sr / original_sr)).round().long()
-        
-        if self.use_cache:
-            torch.save(clean_signal, cache_path)
-            torch.save(ann_samples_target, ann_cache_path)
+            raw_signal = torch.tensor(record.p_signal, dtype=torch.float32)
+            original_sr = record.fs
             
-        self.signals[rec] = clean_signal
-        self.annotations[rec] = ann_samples_target
+            # Clean and resample using preprocessing module
+            clean_signal, _ = preprocess_ecg(raw_signal, original_sr, self.target_sr)
+            
+            # Load annotations and rescale R-peak samples to target_sr
+            ann = wfdb.rdann(rec_path, "atr")
+            ann_samples_original = torch.tensor(ann.sample, dtype=torch.float32)
+            ann_samples_target = (ann_samples_original * (self.target_sr / original_sr)).round().long()
+            
+            if self.use_cache:
+                torch.save(clean_signal, cache_path)
+                torch.save(ann_samples_target, ann_cache_path)
+                
+            self.signals[rec] = clean_signal
+            self.annotations[rec] = ann_samples_target
+            
+        # Compute global record-level mean and std to avoid local division explosions
+        self.record_means[rec] = self.signals[rec].mean(dim=0, keepdim=True)
+        std = self.signals[rec].std(dim=0, keepdim=True)
+        self.record_stds[rec] = torch.where(std > 1e-4, std, torch.ones_like(std))
+
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -99,16 +106,14 @@ class IncartDataset(Dataset):
         context_wf = waveform[start_idx : start_idx + self.context_pts]
         target_wf = waveform[start_idx + self.context_pts : start_idx + self.segment_len_pts]
         
-        # Local z-score normalization per lead to guarantee mean=0 and std=1 per segment
-        context_mean = context_wf.mean(dim=0, keepdim=True)
-        context_std = context_wf.std(dim=0, keepdim=True)
-        context_std = torch.where(context_std > 0, context_std, torch.ones_like(context_std))
-        context_wf = (context_wf - context_mean) / context_std
+        # Global record-level normalization to prevent local division instabilities
+        rec_mean = self.record_means[rec]
+        rec_std = self.record_stds[rec]
         
-        target_mean = target_wf.mean(dim=0, keepdim=True)
-        target_std = target_wf.std(dim=0, keepdim=True)
-        target_std = torch.where(target_std > 0, target_std, torch.ones_like(target_std))
-        target_wf = (target_wf - target_mean) / target_std
+        context_wf = (context_wf - rec_mean) / rec_std
+        target_wf = (target_wf - rec_mean) / rec_std
+
+
         
         dt = 1.0 / self.target_sr
         # Context ends at t=0

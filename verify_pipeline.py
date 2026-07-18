@@ -8,6 +8,7 @@ from torch.utils.data import DataLoader
 import neurokit2 as nk
 import matplotlib.pyplot as plt
 import json
+import yaml
 import torchcde
 from dotenv import load_dotenv
 
@@ -234,16 +235,65 @@ def train_latent_baselines(z0_train, z_dt_train_dict, device, epochs=10, batch_s
         
     return linear_models, mlp_model
 
+def round_dict_floats(obj):
+    if isinstance(obj, float):
+        return round(obj, 4)
+    elif isinstance(obj, dict):
+        return {k: round_dict_floats(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [round_dict_floats(x) for x in obj]
+    elif isinstance(obj, np.ndarray):
+        return round_dict_floats(obj.tolist())
+    elif isinstance(obj, (np.float32, np.float64)):
+        return round(float(obj), 4)
+    elif isinstance(obj, (np.int32, np.int64)):
+        return int(obj)
+    return obj
+
+def save_json_metrics(results, args):
+    run_name = args.wandb_run_name
+    output_dir = os.path.join("output", run_name)
+    os.makedirs(output_dir, exist_ok=True)
+    metrics_file = os.path.join(output_dir, "metrics.json")
+    
+    rounded_results = round_dict_floats(results)
+    
+    with open(metrics_file, "w") as f:
+        json.dump(rounded_results, f, indent=4)
+        
+    print(f"Metrics successfully saved to {metrics_file}")
+
 def main():
     load_dotenv()
     
+    # 1. Pre-parse configuration file argument
+    temp_parser = argparse.ArgumentParser(add_help=False)
+    temp_parser.add_argument("--config", type=str, default="config/incart_config.yaml", help="Path to config YAML file")
+    temp_args, _ = temp_parser.parse_known_args()
+    
+    config_defaults = {}
+    if os.path.exists(temp_args.config):
+        try:
+            with open(temp_args.config, "r") as f:
+                config_defaults = yaml.safe_load(f)
+            print(f"Loaded parameters from config: {temp_args.config}")
+        except Exception as e:
+            print(f"Warning: Failed to load config from {temp_args.config}: {e}")
+            
+    # 2. Main parser
     parser = argparse.ArgumentParser(description="Verification and Baselines Suite for Neuro SDE Pipeline")
+    parser.add_argument("--config", type=str, default="config/incart_config.yaml", help="Path to config YAML file")
     parser.add_argument("--db-dir", type=str, default="/home/qfbqt/8TB/datasets/physionet.org/files/incartdb/1.0.0", help="Path to database directory")
     parser.add_argument("--weight-path", type=str, default=None, help="Path to mimic_iv_ecg_finetuned.pt weight file")
     parser.add_argument("--checkpoint-path", type=str, default="checkpoints/neurosde_final.pt", help="Path to SDE checkpoint")
     parser.add_argument("--save-dir", type=str, default="verification_results", help="Directory to save metrics and plots")
     parser.add_argument("--max-samples", type=int, default=100, help="Maximum test samples to evaluate for slow metrics")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
+    parser.add_argument("--wandb-run-name", type=str, default="incart-epoch5", help="Run name used for output folder")
+    parser.add_argument("--decoder-hidden-dim", type=int, default=256, help="Intermediate hidden dimension of the decoder")
+    parser.add_argument("--latent-dim", type=int, default=32, help="Dimensionality of the continuous latent space")
+    
+    parser.set_defaults(**config_defaults)
     args = parser.parse_args()
     
     set_seed(args.seed)
@@ -258,18 +308,32 @@ def main():
     train_dataset = IncartDataset(args.db_dir, train_recs, use_cache=True)
     test_dataset = IncartDataset(args.db_dir, test_recs, use_cache=True)
     
-    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=False, collate_fn=collate_fn)
-    test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False, collate_fn=collate_fn)
+    train_loader = DataLoader(
+        train_dataset, 
+        batch_size=128, 
+        shuffle=False, 
+        collate_fn=collate_fn,
+        num_workers=4,
+        pin_memory=True
+    )
+    test_loader = DataLoader(
+        test_dataset, 
+        batch_size=128, 
+        shuffle=False, 
+        collate_fn=collate_fn,
+        num_workers=4,
+        pin_memory=True
+    )
     
     # 2. Instantiate Model and Load Pretrained Encoder Weights
-    latent_dim = 32
+    latent_dim = args.latent_dim
     leads = 12
     conv_layers = [(256, 2, 2)] * 4
     
     encoder = PhysiologicalEncoder(in_leads=leads, conv_layers=conv_layers, latent_dim=latent_dim)
     f_base = FBase(latent_dim=latent_dim, hidden_dim=64)
     solver = ContinuousSolver(f_base=f_base)
-    decoder = PhaseTolerantDecoder(latent_dim=latent_dim, leads=leads)
+    decoder = PhaseTolerantDecoder(latent_dim=latent_dim, leads=leads, hidden_dim=args.decoder_hidden_dim)
     model = NeuroSDEBaseline(encoder, solver, decoder).to(device)
     
     weight_file = args.weight_path or os.getenv("ECGFM_FT_WEIGHT_PATH")
@@ -344,11 +408,33 @@ def main():
     # Statistics extraction
     print("Extracting test set latent statistics...")
     test_latents = []
+    eval_batch_size = min(32, args.max_samples)
+    eval_loader = DataLoader(
+        test_dataset, 
+        batch_size=eval_batch_size, 
+        shuffle=False, 
+        collate_fn=collate_fn,
+        num_workers=4,
+        pin_memory=True
+    )
+    
+    samples_processed = 0
     with torch.no_grad():
-        for i in range(min(100, len(test_dataset))):
-            wf, t, _, _, _ = test_dataset[i]
-            z = model.encoder(wf.unsqueeze(0).to(device), t.to(device))
-            test_latents.append(z.cpu())
+        for batch in eval_loader:
+            if samples_processed >= args.max_samples:
+                break
+            
+            c_wf = batch[0].to(device)
+            c_t = batch[1][0].to(device)
+            z = model.encoder(c_wf, c_t)
+            
+            remaining = args.max_samples - samples_processed
+            actual_take = min(z.shape[0], remaining)
+            test_latents.append(z[:actual_take].cpu())
+            samples_processed += actual_take
+            print(f"  Processed {samples_processed}/{args.max_samples} samples...")
+            
+    print("Concatenating latents...")
     test_latents = torch.cat(test_latents, dim=0)
     
     latent_stats = {
@@ -368,49 +454,78 @@ def main():
     # SECTION 3: Test Decoder-Only Reconstruction
     # ==========================================
     print("\n--- Running Section 3: Test Decoder-Only Reconstruction ---")
-    # Evaluate decoder-only reconstruction with CDE latent interpolation
     decoder_only_preds = []
+    context_targets_wf = []
+    context_r_peaks_list = []
+    
     test_targets_wf = []
     test_r_peaks = []
     
+    samples_processed = 0
     with torch.no_grad():
-        for i in range(min(args.max_samples, len(test_dataset))):
-            context_wf, context_t, target_wf, target_t, segment_r_peaks = test_dataset[i]
+        for batch in eval_loader:
+            if samples_processed >= args.max_samples:
+                break
             
-            c_wf = context_wf.unsqueeze(0).to(device)
-            c_t = context_t.to(device)
+            batch_context_wf = batch[0].to(device)
+            batch_context_t = batch[1][0].to(device)
+            batch_target_wf = batch[2]
+            batch_segment_r_peaks = batch[4]
             
-            # Interpolate context CDE latent trajectory to 1000 points
-            z_t_interpolated = get_interpolated_latent_trajectory(model.encoder, c_wf, c_t)
+            # Batched CDE latent trajectory interpolation
+            z_t_interpolated = get_interpolated_latent_trajectory(model.encoder, batch_context_wf, batch_context_t)
             
-            # Decode to waveform
-            pred_wf = model.decoder(z_t_interpolated) # [1, 1000, 12]
+            # Batched decoding (passing context times to SIREN)
+            pred_wf = model.decoder(z_t_interpolated, batch_context_t) # [batch, 1000, 12]
             
-            decoder_only_preds.append(pred_wf.cpu())
-            test_targets_wf.append(target_wf.unsqueeze(0)) # compare against target future segment
-            test_r_peaks.append(segment_r_peaks)
+            batch_size = batch_context_wf.shape[0]
+            remaining = args.max_samples - samples_processed
+            actual_take = min(batch_size, remaining)
             
-            # Save visual plots for the first 20 examples
-            if i < 20:
-                pred_wf_np = pred_wf[0, :, 1].cpu().numpy()
-                target_wf_np = target_wf[:, 1].numpy()
-                peaks_np = segment_r_peaks.cpu().numpy()
-                try:
-                    _, info = nk.ecg_peaks(pred_wf_np, sampling_rate=100)
-                    pred_peaks = info["ECG_R_Peaks"]
-                except Exception:
-                    pred_peaks = np.array([])
-                    
-                plot_and_save_ecg(
-                    original=target_wf_np,
-                    reconstructed=pred_wf_np,
-                    original_peaks=peaks_np,
-                    reconstructed_peaks=pred_peaks,
-                    save_path=os.path.join(args.save_dir, "plots", f"decoder_only_recon_sample_{i}.png"),
-                    title=f"Decoder-Only Reconstruction (Sample {i})"
-                )
+            pred_wf_cpu = pred_wf[:actual_take].cpu()
+            
+            for b in range(actual_take):
+                idx = samples_processed + b
+                decoder_only_preds.append(pred_wf_cpu[b:b+1])
+                context_targets_wf.append(batch[0][b].unsqueeze(0))
                 
-    decoder_metrics = evaluate_waveform_predictions(decoder_only_preds, test_targets_wf, test_r_peaks)
+                # Extract context R-peaks (needs to be sequential, which is fine since it's cheap)
+                rec, start_idx = test_dataset.samples[idx]
+                ann_samples = test_dataset.annotations[rec]
+                context_start = start_idx
+                context_end = start_idx + test_dataset.context_pts
+                mask_context = (ann_samples >= context_start) & (ann_samples < context_end)
+                context_r_peaks = ann_samples[mask_context] - context_start
+                context_r_peaks_list.append(context_r_peaks)
+                
+                # Target future target variables
+                test_targets_wf.append(batch_target_wf[b].unsqueeze(0))
+                test_r_peaks.append(batch_segment_r_peaks[b])
+                
+                # Visual plots for first 20 examples
+                if idx < 20:
+                    pred_wf_np = pred_wf_cpu[b, :, 1].numpy()
+                    context_wf_np = batch[0][b, :, 1].numpy()
+                    peaks_np = context_r_peaks.cpu().numpy()
+                    try:
+                        _, info = nk.ecg_peaks(pred_wf_np, sampling_rate=100)
+                        pred_peaks = info["ECG_R_Peaks"]
+                    except Exception:
+                        pred_peaks = np.array([])
+                        
+                    plot_and_save_ecg(
+                        original=context_wf_np,
+                        reconstructed=pred_wf_np,
+                        original_peaks=peaks_np,
+                        reconstructed_peaks=pred_peaks,
+                        save_path=os.path.join(args.save_dir, "plots", f"decoder_only_recon_sample_{idx}.png"),
+                        title=f"Decoder-Only Context Reconstruction (Sample {idx})"
+                    )
+            
+            samples_processed += actual_take
+            print(f"  Processed {samples_processed}/{args.max_samples} samples...")
+            
+    decoder_metrics = evaluate_waveform_predictions(decoder_only_preds, context_targets_wf, context_r_peaks_list)
     print("Decoder-only reconstruction metrics:")
     for k, v in decoder_metrics.items():
         print(f"  {k}: {v:.5f}")
@@ -422,40 +537,54 @@ def main():
     print("\n--- Running Section 4: Test Oracle Future Latent Reconstruction ---")
     oracle_preds = []
     
+    samples_processed = 0
     with torch.no_grad():
-        for i in range(min(args.max_samples, len(test_dataset))):
-            _, _, target_wf, target_t, segment_r_peaks = test_dataset[i]
-            
-            t_wf = target_wf.unsqueeze(0).to(device)
-            t_t = target_t.to(device)
-            
-            # Encode and interpolate future CDE latent trajectory
-            z_future_interpolated = get_interpolated_latent_trajectory(model.encoder, t_wf, t_t)
-            
-            # Decode to waveform
-            pred_wf = model.decoder(z_future_interpolated)
-            
-            oracle_preds.append(pred_wf.cpu())
-            
-            if i < 20:
-                pred_wf_np = pred_wf[0, :, 1].cpu().numpy()
-                target_wf_np = target_wf[:, 1].numpy()
-                peaks_np = segment_r_peaks.cpu().numpy()
-                try:
-                    _, info = nk.ecg_peaks(pred_wf_np, sampling_rate=100)
-                    pred_peaks = info["ECG_R_Peaks"]
-                except Exception:
-                    pred_peaks = np.array([])
-                    
-                plot_and_save_ecg(
-                    original=target_wf_np,
-                    reconstructed=pred_wf_np,
-                    original_peaks=peaks_np,
-                    reconstructed_peaks=pred_peaks,
-                    save_path=os.path.join(args.save_dir, "plots", f"oracle_recon_sample_{i}.png"),
-                    title=f"Oracle Future Reconstruction (Sample {i})"
-                )
+        for batch in eval_loader:
+            if samples_processed >= args.max_samples:
+                break
                 
+            batch_target_wf = batch[2].to(device)
+            batch_target_t = batch[3][0].to(device)
+            
+            # Batched CDE latent trajectory interpolation
+            z_future_interpolated = get_interpolated_latent_trajectory(model.encoder, batch_target_wf, batch_target_t)
+            
+            # Batched decoding (passing future target times to SIREN)
+            pred_wf = model.decoder(z_future_interpolated, batch_target_t)
+            
+            batch_size = batch_target_wf.shape[0]
+            remaining = args.max_samples - samples_processed
+            actual_take = min(batch_size, remaining)
+            
+            pred_wf_cpu = pred_wf[:actual_take].cpu()
+            
+            for b in range(actual_take):
+                idx = samples_processed + b
+                oracle_preds.append(pred_wf_cpu[b:b+1])
+                
+                # Visual plots for first 20 examples
+                if idx < 20:
+                    pred_wf_np = pred_wf_cpu[b, :, 1].numpy()
+                    target_wf_np = batch[2][b, :, 1].numpy()
+                    peaks_np = batch[4][b].cpu().numpy()
+                    try:
+                        _, info = nk.ecg_peaks(pred_wf_np, sampling_rate=100)
+                        pred_peaks = info["ECG_R_Peaks"]
+                    except Exception:
+                        pred_peaks = np.array([])
+                        
+                    plot_and_save_ecg(
+                        original=target_wf_np,
+                        reconstructed=pred_wf_np,
+                        original_peaks=peaks_np,
+                        reconstructed_peaks=pred_peaks,
+                        save_path=os.path.join(args.save_dir, "plots", f"oracle_recon_sample_{idx}.png"),
+                        title=f"Oracle Future Reconstruction (Sample {idx})"
+                    )
+            
+            samples_processed += actual_take
+            print(f"  Processed {samples_processed}/{args.max_samples} samples...")
+            
     oracle_metrics = evaluate_waveform_predictions(oracle_preds, test_targets_wf, test_r_peaks)
     print("Oracle reconstruction metrics:")
     for k, v in oracle_metrics.items():
@@ -581,6 +710,7 @@ def main():
     with open(os.path.join(args.save_dir, "verification_metrics_temp.json"), "w") as f:
         json.dump(results, f, indent=4)
     print(f"\nIntermediate verification results written to {os.path.join(args.save_dir, 'verification_metrics_temp.json')}")
+    save_json_metrics(results, args)
     
     # ==========================================
     # SECTION 7: Evaluate SDE Latent Prediction (requires SDE checkpoint)
@@ -621,6 +751,7 @@ def main():
     with open(os.path.join(args.save_dir, "verification_metrics_final.json"), "w") as f:
         json.dump(results, f, indent=4)
     print(f"Final verification metrics written to {os.path.join(args.save_dir, 'verification_metrics_final.json')}")
+    save_json_metrics(results, args)
 
 if __name__ == "__main__":
     main()

@@ -1,0 +1,11 @@
+db_dir: "/home/qfbqt/8TB/datasets/physionet.org/files/incartdb/1.0.0"
+weight_path: null
+pretrain_epochs: 50
+batch_size: 32
+lr: 0.001
+seed: 42
+save_path: "checkpoints/pretrained_autoencoder.pt"
+decoder_hidden_dim: 256
+latent_dim: 32
+resume: false
+wandb_run_name: "autoencoder_pretrain"

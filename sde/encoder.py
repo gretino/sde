@@ -14,6 +14,10 @@ class CDEFunc(nn.Module):
         self.linear1 = nn.Linear(hidden_channels, 128)
         self.relu = nn.ReLU()
         self.linear2 = nn.Linear(128, input_channels * hidden_channels)
+        
+        # Zero-initialize the vector field output to stabilize initial integration trajectories
+        nn.init.zeros_(self.linear2.weight)
+        nn.init.zeros_(self.linear2.bias)
 
     def forward(self, t, z):
         # z: [batch, hidden_channels]
@@ -21,7 +25,7 @@ class CDEFunc(nn.Module):
         z = self.relu(z)
         z = self.linear2(z)
         z = z.view(*z.shape[:-1], self.hidden_channels, self.input_channels)
-        return z
+        return torch.tanh(z)
 
 class PhysiologicalEncoder(nn.Module):
     """
@@ -37,6 +41,10 @@ class PhysiologicalEncoder(nn.Module):
         
         self.cde_func = CDEFunc(cde_input_dim, latent_dim)
         self.initial_mapping = nn.Linear(cde_input_dim, latent_dim)
+        
+        # Near-zero initialization to silence initial latent noise and enable coordinate bootstrapping
+        nn.init.normal_(self.initial_mapping.weight, mean=0.0, std=1e-4)
+        nn.init.constant_(self.initial_mapping.bias, 0.0)
         
     def forward(self, waveform: torch.Tensor, times: torch.Tensor) -> torch.Tensor:
         """

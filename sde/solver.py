@@ -10,7 +10,7 @@ class FBase(nn.Module):
     def __init__(self, latent_dim: int, hidden_dim: int):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(latent_dim, hidden_dim),
+            nn.Linear(latent_dim + 1, hidden_dim),
             nn.Tanh(),
             nn.Linear(hidden_dim, latent_dim)
         )
@@ -20,7 +20,12 @@ class FBase(nn.Module):
         ODE derivative function: dz/dt = f_base(t, z).
         torchdiffeq expects signature (t, y).
         """
-        return self.net(z)
+        # Scale time coordinate to [0, 1] range to avoid ODE solver stiffness/explosion (query times go up to 10s)
+        t_scaled = t / 10.0
+        t_expanded = t_scaled.expand(z.size(0), 1)
+        x = torch.cat([z, t_expanded], dim=-1)
+        return self.net(x)
+
 
 class ContinuousSolver(nn.Module):
     """

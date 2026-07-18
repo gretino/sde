@@ -40,7 +40,10 @@ if [ "$ACTION" == "train" ]; then
 elif [ "$ACTION" == "verify" ]; then
   echo "Running verification on GPU $GPU with args: $ARGS"
   $PYTHON_CMD verify_pipeline.py $ARGS
+elif [ "$ACTION" == "verify_single" ] || [ "$ACTION" == "verify-single" ]; then
+  echo "Running single-sample verification on GPU $GPU with args: $ARGS"
+  $PYTHON_CMD verify_single.py $ARGS
 else
-  echo "Unknown action: $ACTION. Use 'train' or 'verify'."
+  echo "Unknown action: $ACTION. Use 'train', 'verify', or 'verify_single'."
   exit 1
 fi

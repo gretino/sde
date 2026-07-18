@@ -9,6 +9,7 @@ verification_results/
 wandb/
 checkpoints/
 *.pt
+output/
 # C extensions
 *.so
 # Distribution / packaging
