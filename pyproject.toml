@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ecg-forecast"
+version = "0.1.0"
+description = "Conditional Latent SDE System for Natural ECG Learning and Forecasting"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "torch",
+    "torchsde",
+    "wfdb",
+    "numpy",
+    "scipy",
+    "pyyaml",
+    "tqdm",
+    "wandb",
+    "neurokit2",
+    "matplotlib",
+    "pytest",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"

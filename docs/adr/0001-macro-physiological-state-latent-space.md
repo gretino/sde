@@ -1,3 +1,7 @@
 # Macro Physiological State Latent Space
 
-To simulate continuous baseline dynamics ($f_{base}$) without encountering extreme ODE solver stiffness from fast intra-beat voltage changes, we decided to decouple the continuous-time latent space from the direct raw waveform path. The latent space canonically represents the macro-level **Physiological State** (capturing slow-moving drivers like autonomic tone and baseline rate drift), while a dedicated waveform decoder maps this instantaneous state to reconstruct high-frequency intra-beat ECG waveforms at query timestamps.
+To simulate continuous baseline dynamics ($f_{\text{base}}$) and future ECG rollouts without encountering extreme solver stiffness from high-frequency intra-beat voltage oscillations, we decouple the continuous-time latent space from raw waveform voltages. The latent space canonically represents the continuous macro-level **Physiological State** ($z_t \in \mathbb{R}^{32}$), evolved probabilistically via a conditional Itô Latent Stochastic Differential Equation (SDE) with diagonal diffusion:
+
+$$dz_t = f(t, z_t)\,dt + g(z_t)\,dW_t$$
+
+A dedicated emission decoder maps discrete 25 Hz continuous-time latent trajectory states into reconstructed 100 Hz 12-lead ECG waveforms at query timestamps.

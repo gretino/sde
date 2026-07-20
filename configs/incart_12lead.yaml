@@ -1,0 +1,22 @@
+seed: 42
+sampling_rate: 100
+context_seconds: 5.0
+future_seconds: 2.0
+stride_seconds: 1.0
+lead_indices: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+latent_rate: 25
+latent_dim: 32
+context_dim: 128
+batch_size: 64
+learning_rate: 0.0003
+weight_decay: 0.0001
+posterior_warmup_epochs: 10
+prior_alignment_epochs: 20
+forecast_refinement_epochs: 20
+num_workers: 8
+mixed_precision: true
+prior_samples_eval: 16
+use_wandb: true
+wandb_project: "ecg-natural-dynamics"
+run_name: "incart_12lead"
+checkpoint_dir: "checkpoints/incart_12lead"

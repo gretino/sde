@@ -1,0 +1,5 @@
+# Causal ResNet Context Encoding and Latent SDE Dynamics
+
+To ensure time-translation invariance for the continuous baseline drift module, we map the **Normalized Anchor Time** separating the 5.0-second context window and 2.0-second future window to $t=0$, evaluating all future forecast queries at relative positive time offsets ($\Delta t > 0$).
+
+To downsample high-frequency continuous raw ECG signals (100 Hz) into manageable sequence features without reliance on external foundation models (e.g., ECG-FM) or stiff Neural CDE paths, we implement a lightweight 1D Causal Residual CNN context encoder. The encoder downsamples the 500-sample context window by a factor of 4 into 125 sequence features (25 Hz equivalent) and applies attention pooling to produce a context summary vector ($c \in \mathbb{R}^{128}$). This summary vector parameterizes the initial latent distribution $p(z_0 \mid x_{\text{context}})$ and conditions both prior drift $h(t, z, c)$ and posterior drift $f(t, z, c, \text{rec}_t)$ solved continuously via `torchsde`.

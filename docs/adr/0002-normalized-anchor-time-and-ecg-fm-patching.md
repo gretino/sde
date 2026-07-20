@@ -1,3 +1,0 @@
-# Normalized Anchor Time and ECG-FM Patching
-
-To ensure the continuous baseline drift module ($f_{base}$) learns time-translation-invariant physiological dynamics, we decided to canonically map the **Anchor Time** separating context and target windows to $t=0$, evaluating all future queries at relative positive offsets ($\Delta t > 0$). Furthermore, to avoid integrating Neural CDEs over thousands of raw high-frequency waveform samples, we utilize the pretrained ECG-FM foundation model's feature encoder to downsample continuous segments into dense localized latent sequence frames (**Waveform Patching**) before constructing the continuous integration path.
