@@ -70,7 +70,7 @@ def main():
     parser.add_argument("--config", type=str, default="config/incart_config.yaml", help="Path to config YAML file")
     parser.add_argument("--db-dir", type=str, default="/home/qfbqt/8TB/datasets/physionet.org/files/incartdb/1.0.0", help="Path to database directory")
     parser.add_argument("--weight-path", type=str, default=None, help="Path to mimic_iv_ecg_finetuned.pt weight file")
-    parser.add_argument("--checkpoint-path", type=str, default="checkpoints/neurosde_final.pt", help="Path to SDE checkpoint")
+    parser.add_argument("--checkpoint-path", type=str, default="checkpoints/stage1/neurosde_final.pt", help="Path to SDE checkpoint")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--wandb-run-name", type=str, default="incart-epoch5", help="Run name used for output folder")
     parser.add_argument("--sample-idx", type=int, default=0, help="Index of the test set sample to evaluate")
