@@ -71,6 +71,34 @@ class LatentSDEForecaster(nn.Module):
         )
         return kl.sum(dim=-1).mean()
 
+    def forward(
+        self,
+        context_waveform: torch.Tensor,
+        future_waveform: Optional[torch.Tensor] = None,
+        context_times: Optional[torch.Tensor] = None,
+        future_times: Optional[torch.Tensor] = None,
+        mode: str = "posterior",
+        num_samples: int = 1,
+        brownian_motion: Optional[object] = None,
+    ) -> ForecastOutput:
+        """Main PyTorch forward entrypoint compatible with DataParallel multi-GPU batch scattering."""
+        if mode == "posterior" and future_waveform is not None:
+            return self.forward_posterior(
+                context_waveform=context_waveform,
+                future_waveform=future_waveform,
+                context_times=context_times,
+                future_times=future_times,
+                brownian_motion=brownian_motion,
+            )
+        else:
+            return self.forward_prior(
+                context_waveform=context_waveform,
+                context_times=context_times,
+                future_times=future_times,
+                num_samples=num_samples,
+                brownian_motion=brownian_motion,
+            )
+
     def forward_posterior(
         self,
         context_waveform: torch.Tensor,
@@ -99,6 +127,8 @@ class LatentSDEForecaster(nn.Module):
         # Build timestamps [50] (0.04, 0.08, ..., 2.00)
         if future_times is not None and future_times.dim() == 1:
             ts = future_times[::4]  # Downsample 200 -> 50 timestamps
+        elif future_times is not None and future_times.dim() == 2:
+            ts = future_times[0, ::4]
         else:
             ts = torch.linspace(0.04, 2.0, 50, device=device)
 
@@ -149,6 +179,8 @@ class LatentSDEForecaster(nn.Module):
 
         if future_times is not None and future_times.dim() == 1:
             ts = future_times[::4]
+        elif future_times is not None and future_times.dim() == 2:
+            ts = future_times[0, ::4]
         else:
             ts = torch.linspace(0.04, 2.0, 50, device=device)
 

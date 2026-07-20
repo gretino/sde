@@ -105,11 +105,13 @@ class Trainer:
             self.optimizer.zero_grad(set_to_none=True)
 
             with torch.amp.autocast("cuda", enabled=self.use_amp):
-                output = unwrapped.forward_posterior(
+                # Call self.model() so PyTorch DataParallel splits batch across GPUs
+                output = self.model(
                     context_waveform=c_wf,
                     future_waveform=f_wf,
                     context_times=c_times,
                     future_times=f_times,
+                    mode="posterior",
                 )
 
                 elbo_loss, elbo_dict = compute_elbo_loss(
@@ -186,14 +188,26 @@ class Trainer:
             c_times = batch["context_times"].to(self.device, non_blocking=True)
             f_times = batch["future_times"].to(self.device, non_blocking=True)
 
-            post_out = unwrapped.forward_posterior(c_wf, f_wf, c_times, f_times)
+            post_out = self.model(
+                context_waveform=c_wf,
+                future_waveform=f_wf,
+                context_times=c_times,
+                future_times=f_times,
+                mode="posterior",
+            )
             post_elbo, post_dict = compute_elbo_loss(
                 post_out.waveform_mean, f_wf, post_out.waveform_scale, post_out.initial_kl, post_out.path_kl
             )
             post_wf_m = compute_waveform_metrics(post_out.waveform_mean, f_wf)
             post_rhythm_m = compute_rhythm_metrics(post_out.waveform_mean, batch["future_r_peaks"])
 
-            prior_out = unwrapped.forward_prior(c_wf, c_times, f_times, num_samples=1)
+            prior_out = self.model(
+                context_waveform=c_wf,
+                context_times=c_times,
+                future_times=f_times,
+                mode="prior",
+                num_samples=1,
+            )
             prior_elbo, prior_dict = compute_elbo_loss(
                 prior_out.waveform_mean, f_wf, prior_out.waveform_scale, prior_out.initial_kl, prior_out.path_kl
             )
