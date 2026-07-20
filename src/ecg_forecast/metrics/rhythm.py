@@ -95,11 +95,12 @@ def compute_rhythm_metrics(
     sampling_rate: int = 100,
     lead_idx: int = 0,
 ) -> Dict[str, float]:
-    """Computes R-peak F1, Heart-Rate MAE, and RMSSD MAE over a batch."""
+    """Computes R-peak F1, Heart-Rate MAE, RMSSD MAE, and tracks zero-peak detection rate over a batch."""
     pred_np = pred_waveforms.detach().cpu().numpy()
     b = pred_np.shape[0]
 
     total_tp, total_fp, total_fn = 0, 0, 0
+    zero_peak_count = 0
     hr_errors = []
     rmssd_errors = []
 
@@ -108,6 +109,9 @@ def compute_rhythm_metrics(
         for i in range(b):
             sig = pred_np[i, :, lead_idx]
             pred_peaks = detect_r_peaks_lead(sig, sampling_rate=sampling_rate)
+
+            if len(pred_peaks) == 0:
+                zero_peak_count += 1
 
             tgt_peaks_tensor = target_r_peaks_list[i]
             tgt_peaks = tgt_peaks_tensor.cpu().numpy() if isinstance(tgt_peaks_tensor, torch.Tensor) else np.array(tgt_peaks_tensor)
@@ -136,4 +140,7 @@ def compute_rhythm_metrics(
         "rpeak_f1": float(f1),
         "hr_mae": hr_mae,
         "rmssd_mae": rmssd_mae,
+        "zero_peak_count": float(zero_peak_count),
+        "total_samples": float(b),
+        "zero_peak_pct": float(zero_peak_count / max(1, b) * 100.0),
     }

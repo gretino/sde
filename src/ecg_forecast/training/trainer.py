@@ -174,6 +174,8 @@ class Trainer:
             "prior_rpeak_f1": [],
             "mse": [],
             "mae": [],
+            "zero_peaks": [],
+            "total_samples": [],
         }
 
         vis_sample_done = False
@@ -206,6 +208,8 @@ class Trainer:
             val_metrics["prior_rpeak_f1"].append(prior_rhythm_m["rpeak_f1"])
             val_metrics["mse"].append(prior_wf_m["mse"])
             val_metrics["mae"].append(prior_wf_m["mae"])
+            val_metrics["zero_peaks"].append(prior_rhythm_m["zero_peak_count"])
+            val_metrics["total_samples"].append(prior_rhythm_m["total_samples"])
 
             if save_vis_path is not None and not vis_sample_done:
                 vis_sample_done = True
@@ -223,7 +227,12 @@ class Trainer:
                     save_path=save_vis_path,
                 )
 
-        res = {k: (float(np.mean(v)) if len(v) > 0 else 0.0) for k, v in val_metrics.items()}
+        tot_zero = int(sum(val_metrics["zero_peaks"]))
+        tot_samples = int(sum(val_metrics["total_samples"]))
+
+        res = {k: (float(np.mean(v)) if len(v) > 0 else 0.0) for k, v in val_metrics.items() if k not in ["zero_peaks", "total_samples"]}
+        res["zero_peaks_count"] = float(tot_zero)
+        res["zero_peaks_pct"] = float(tot_zero / max(1, tot_samples) * 100.0)
         res["prior_forecast_score"] = res["prior_nll"] + (1.0 - res["prior_pearson"]) + (1.0 - res["prior_rpeak_f1"])
         return res
 
@@ -245,6 +254,7 @@ class Trainer:
 
             step_metrics = {**train_m, **val_m}
             self.logger.log_summary("A", epoch + 1, step_metrics)
+            print(f"  [R-peak Detection] {int(val_m['zero_peaks_count'])} zero-peak forecasts out of val set ({val_m['zero_peaks_pct']:.1f}%)")
             self.logger.log(step_metrics, step=self.global_step)
             self.logger.log_image("stage_A_visualization", vis_path, step=self.global_step)
 
@@ -273,6 +283,7 @@ class Trainer:
 
             step_metrics = {**train_m, **val_m}
             self.logger.log_summary("B", epoch + 1, step_metrics)
+            print(f"  [R-peak Detection] {int(val_m['zero_peaks_count'])} zero-peak forecasts out of val set ({val_m['zero_peaks_pct']:.1f}%)")
             self.logger.log(step_metrics, step=self.global_step)
             self.logger.log_image("stage_B_visualization", vis_path, step=self.global_step)
 
@@ -304,6 +315,7 @@ class Trainer:
 
             step_metrics = {**train_m, **val_m}
             self.logger.log_summary("C", epoch + 1, step_metrics)
+            print(f"  [R-peak Detection] {int(val_m['zero_peaks_count'])} zero-peak forecasts out of val set ({val_m['zero_peaks_pct']:.1f}%)")
             self.logger.log(step_metrics, step=self.global_step)
             self.logger.log_image("stage_C_visualization", vis_path, step=self.global_step)
 
