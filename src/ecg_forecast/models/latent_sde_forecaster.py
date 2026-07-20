@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Dict, Any
 import torch
 import torch.nn as nn
 
@@ -17,6 +17,16 @@ class ForecastOutput:
     latent_path: torch.Tensor
     initial_kl: Optional[torch.Tensor] = None
     path_kl: Optional[torch.Tensor] = None
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "ForecastOutput":
+        return cls(
+            waveform_mean=d["waveform_mean"],
+            waveform_scale=d["waveform_scale"],
+            latent_path=d["latent_path"],
+            initial_kl=d.get("initial_kl"),
+            path_kl=d.get("path_kl"),
+        )
 
 
 class LatentSDEForecaster(nn.Module):
@@ -80,10 +90,10 @@ class LatentSDEForecaster(nn.Module):
         mode: str = "posterior",
         num_samples: int = 1,
         brownian_motion: Optional[object] = None,
-    ) -> ForecastOutput:
-        """Main PyTorch forward entrypoint compatible with DataParallel multi-GPU batch scattering."""
+    ) -> Dict[str, torch.Tensor]:
+        """Main PyTorch forward entrypoint returning dict for DataParallel gathering."""
         if mode == "posterior" and future_waveform is not None:
-            return self.forward_posterior(
+            out = self.forward_posterior(
                 context_waveform=context_waveform,
                 future_waveform=future_waveform,
                 context_times=context_times,
@@ -91,13 +101,31 @@ class LatentSDEForecaster(nn.Module):
                 brownian_motion=brownian_motion,
             )
         else:
-            return self.forward_prior(
+            out = self.forward_prior(
                 context_waveform=context_waveform,
                 context_times=context_times,
                 future_times=future_times,
                 num_samples=num_samples,
                 brownian_motion=brownian_motion,
             )
+
+        dev = out.waveform_mean.device
+        init_kl = out.initial_kl if out.initial_kl is not None else torch.tensor(0.0, device=dev)
+        path_kl = out.path_kl if out.path_kl is not None else torch.tensor(0.0, device=dev)
+
+        # Make scalar KLs 1D tensors [1] for DataParallel gathering
+        if init_kl.dim() == 0:
+            init_kl = init_kl.unsqueeze(0)
+        if path_kl.dim() == 0:
+            path_kl = path_kl.unsqueeze(0)
+
+        return {
+            "waveform_mean": out.waveform_mean,
+            "waveform_scale": out.waveform_scale,
+            "latent_path": out.latent_path,
+            "initial_kl": init_kl,
+            "path_kl": path_kl,
+        }
 
     def forward_posterior(
         self,
@@ -126,7 +154,7 @@ class LatentSDEForecaster(nn.Module):
 
         # Build timestamps [50] (0.04, 0.08, ..., 2.00)
         if future_times is not None and future_times.dim() == 1:
-            ts = future_times[::4]  # Downsample 200 -> 50 timestamps
+            ts = future_times[::4]
         elif future_times is not None and future_times.dim() == 2:
             ts = future_times[0, ::4]
         else:

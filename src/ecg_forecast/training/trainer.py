@@ -7,7 +7,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from ..config import Config
-from ..models.latent_sde_forecaster import LatentSDEForecaster
+from ..models.latent_sde_forecaster import LatentSDEForecaster, ForecastOutput
 from ..losses.elbo import compute_elbo_loss
 from ..losses.morphology import compute_morphology_loss
 from ..losses.schedules import get_loss_weights
@@ -105,14 +105,14 @@ class Trainer:
             self.optimizer.zero_grad(set_to_none=True)
 
             with torch.amp.autocast("cuda", enabled=self.use_amp):
-                # Call self.model() so PyTorch DataParallel splits batch across GPUs
-                output = self.model(
+                out_dict = self.model(
                     context_waveform=c_wf,
                     future_waveform=f_wf,
                     context_times=c_times,
                     future_times=f_times,
                     mode="posterior",
                 )
+                output = ForecastOutput.from_dict(out_dict)
 
                 elbo_loss, elbo_dict = compute_elbo_loss(
                     pred_mean=output.waveform_mean,
@@ -188,34 +188,36 @@ class Trainer:
             c_times = batch["context_times"].to(self.device, non_blocking=True)
             f_times = batch["future_times"].to(self.device, non_blocking=True)
 
-            post_out = self.model(
+            post_dict = self.model(
                 context_waveform=c_wf,
                 future_waveform=f_wf,
                 context_times=c_times,
                 future_times=f_times,
                 mode="posterior",
             )
-            post_elbo, post_dict = compute_elbo_loss(
+            post_out = ForecastOutput.from_dict(post_dict)
+            post_elbo, post_dict_loss = compute_elbo_loss(
                 post_out.waveform_mean, f_wf, post_out.waveform_scale, post_out.initial_kl, post_out.path_kl
             )
             post_wf_m = compute_waveform_metrics(post_out.waveform_mean, f_wf)
             post_rhythm_m = compute_rhythm_metrics(post_out.waveform_mean, batch["future_r_peaks"])
 
-            prior_out = self.model(
+            prior_dict = self.model(
                 context_waveform=c_wf,
                 context_times=c_times,
                 future_times=f_times,
                 mode="prior",
                 num_samples=1,
             )
-            prior_elbo, prior_dict = compute_elbo_loss(
+            prior_out = ForecastOutput.from_dict(prior_dict)
+            prior_elbo, prior_dict_loss = compute_elbo_loss(
                 prior_out.waveform_mean, f_wf, prior_out.waveform_scale, prior_out.initial_kl, prior_out.path_kl
             )
             prior_wf_m = compute_waveform_metrics(prior_out.waveform_mean, f_wf)
             prior_rhythm_m = compute_rhythm_metrics(prior_out.waveform_mean, batch["future_r_peaks"])
 
-            val_metrics["post_nll"].append(post_dict["nll"])
-            val_metrics["prior_nll"].append(prior_dict["nll"])
+            val_metrics["post_nll"].append(post_dict_loss["nll"])
+            val_metrics["prior_nll"].append(prior_dict_loss["nll"])
             val_metrics["post_pearson"].append(post_wf_m["pearson"])
             val_metrics["prior_pearson"].append(prior_wf_m["pearson"])
             val_metrics["post_rpeak_f1"].append(post_rhythm_m["rpeak_f1"])
