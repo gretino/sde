@@ -96,7 +96,7 @@ class Trainer:
             "latent_temporal_std": [],
         }
 
-        for batch in tqdm(self.train_loader, desc=f"Train Stage {stage} Ep {epoch_in_stage+1}", leave=False):
+        for batch in tqdm(self.train_loader, desc=f"Train Stage {stage} Epoch {epoch_in_stage+1}", leave=False):
             c_wf = batch["context_waveform"].to(self.device, non_blocking=True)
             f_wf = batch["future_waveform"].to(self.device, non_blocking=True)
             c_times = batch["context_times"].to(self.device, non_blocking=True)
@@ -263,16 +263,19 @@ class Trainer:
         best_stage_a_nll = float("inf")
         epochs_a = self.config.training.posterior_warmup_epochs
 
+        total_epoch = 0
+
         for epoch in range(epochs_a):
+            total_epoch += 1
             train_m = self.train_epoch(stage="A", epoch_in_stage=epoch, total_stage_epochs=epochs_a)
-            vis_path = os.path.join(vis_dir, f"stage_A_ep{epoch+1:02d}.png")
+            vis_path = os.path.join(vis_dir, f"stage_A_epoch{epoch+1:02d}.png")
             val_m = self.evaluate(save_vis_path=vis_path)
 
             step_metrics = {**train_m, **val_m}
             self.logger.log_summary("A", epoch + 1, step_metrics)
             print(f"  [R-peak Detection] {int(val_m['zero_peaks_count'])} zero-peak forecasts out of val set ({val_m['zero_peaks_pct']:.1f}%)")
-            self.logger.log(step_metrics, step=self.global_step)
-            self.logger.log_image("stage_A_visualization", vis_path, step=self.global_step)
+            self.logger.log(step_metrics, step=total_epoch)
+            self.logger.log_image("stage_A_visualization", vis_path, step=total_epoch)
 
             if val_m["post_nll"] < best_stage_a_nll:
                 best_stage_a_nll = val_m["post_nll"]
@@ -293,15 +296,16 @@ class Trainer:
         epochs_b = self.config.training.prior_alignment_epochs
 
         for epoch in range(epochs_b):
+            total_epoch += 1
             train_m = self.train_epoch(stage="B", epoch_in_stage=epoch, total_stage_epochs=epochs_b)
-            vis_path = os.path.join(vis_dir, f"stage_B_ep{epoch+1:02d}.png")
+            vis_path = os.path.join(vis_dir, f"stage_B_epoch{epoch+1:02d}.png")
             val_m = self.evaluate(save_vis_path=vis_path)
 
             step_metrics = {**train_m, **val_m}
             self.logger.log_summary("B", epoch + 1, step_metrics)
             print(f"  [R-peak Detection] {int(val_m['zero_peaks_count'])} zero-peak forecasts out of val set ({val_m['zero_peaks_pct']:.1f}%)")
-            self.logger.log(step_metrics, step=self.global_step)
-            self.logger.log_image("stage_B_visualization", vis_path, step=self.global_step)
+            self.logger.log(step_metrics, step=total_epoch)
+            self.logger.log_image("stage_B_visualization", vis_path, step=total_epoch)
 
             if val_m["prior_forecast_score"] < best_stage_b_score:
                 best_stage_b_score = val_m["prior_forecast_score"]
@@ -325,15 +329,16 @@ class Trainer:
         epochs_c = self.config.training.forecast_refinement_epochs
 
         for epoch in range(epochs_c):
+            total_epoch += 1
             train_m = self.train_epoch(stage="C", epoch_in_stage=epoch, total_stage_epochs=epochs_c)
-            vis_path = os.path.join(vis_dir, f"stage_C_ep{epoch+1:02d}.png")
+            vis_path = os.path.join(vis_dir, f"stage_C_epoch{epoch+1:02d}.png")
             val_m = self.evaluate(save_vis_path=vis_path)
 
             step_metrics = {**train_m, **val_m}
             self.logger.log_summary("C", epoch + 1, step_metrics)
             print(f"  [R-peak Detection] {int(val_m['zero_peaks_count'])} zero-peak forecasts out of val set ({val_m['zero_peaks_pct']:.1f}%)")
-            self.logger.log(step_metrics, step=self.global_step)
-            self.logger.log_image("stage_C_visualization", vis_path, step=self.global_step)
+            self.logger.log(step_metrics, step=total_epoch)
+            self.logger.log_image("stage_C_visualization", vis_path, step=total_epoch)
 
             if val_m["prior_forecast_score"] < best_stage_c_score:
                 best_stage_c_score = val_m["prior_forecast_score"]
