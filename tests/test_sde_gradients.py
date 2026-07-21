@@ -10,10 +10,11 @@ from ecg_forecast.losses.morphology import compute_morphology_loss
 def test_sde_gradients_all_modules():
     cfg = ModelConfig(num_leads=1, latent_dim=16, context_dim=64)
     model = LatentSDEForecaster(config=cfg)
+    model.set_stage("C")
 
     b = 2
     c_wf = torch.randn(b, 500, 1, requires_grad=True)
-    f_wf = torch.randn(b, 200, 1, requires_grad=True)
+    f_wf = torch.randn(2, 200, 1, requires_grad=True)
 
     post_out = model.forward_posterior(c_wf, f_wf)
 

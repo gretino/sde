@@ -61,6 +61,10 @@ class LatentSDEForecaster(nn.Module):
             context_dim=self.context_dim,
         )
 
+    def set_stage(self, stage: str):
+        self.sde.set_stage(stage)
+        self.decoder.set_stage(stage)
+
     def _reparameterize(self, mean: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
         std = torch.exp(0.5 * logvar)
         eps = torch.randn_like(std)

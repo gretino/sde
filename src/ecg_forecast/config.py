@@ -95,16 +95,40 @@ class LossConfig:
     beta_path: float = 1.0
     lambda_derivative: float = 0.5
     lambda_spectral: float = 0.1
+    stage_b_initial_teacher_weight: float = 0.01
+    stage_b_drift_teacher_weight: float = 0.01
+    stage_c_initial_kl_start: float = 1e-5
+    stage_c_initial_kl_max: float = 1e-2
+    stage_c_path_kl_start: float = 1e-6
+    stage_c_path_kl_max: float = 1e-3
+    kl_ramp_epochs: int = 20
+    max_weighted_kl_ratio: float = 0.20
+
+
+@dataclass
+class StabilityConfig:
+    fixed_diffusion_stage_a_b: float = 0.01
+    diffusion_min_stage_c: float = 0.005
+    diffusion_max_stage_c: float = 0.05
+    fixed_observation_scale_stage_a_b: float = 0.10
+    observation_scale_min_stage_c: float = 0.03
+    observation_scale_max_stage_c: float = 0.30
 
 
 @dataclass
 class TrainingConfig:
     batch_size: int = 32
     learning_rate: float = 3e-4
+    stage_a_learning_rate: float = 3e-4
+    stage_b_prior_learning_rate: float = 3e-4
+    stage_b_context_learning_rate: float = 1e-5
+    stage_c_prior_learning_rate: float = 1e-4
+    stage_c_shared_learning_rate: float = 1e-5
+    stage_c_diffusion_learning_rate: float = 1e-6
     weight_decay: float = 1e-4
     clip_grad: float = 1.0
-    posterior_warmup_epochs: int = 10
-    prior_alignment_epochs: int = 20
+    posterior_warmup_epochs: int = 20
+    prior_alignment_epochs: int = 50
     forecast_refinement_epochs: int = 20
     num_workers: int = 0
     mixed_precision: bool = False
@@ -120,6 +144,12 @@ class TrainingConfig:
         batch_size: int = 32,
         learning_rate: Optional[float] = None,
         lr: Optional[float] = None,
+        stage_a_learning_rate: Optional[float] = None,
+        stage_b_prior_learning_rate: Optional[float] = None,
+        stage_b_context_learning_rate: Optional[float] = None,
+        stage_c_prior_learning_rate: Optional[float] = None,
+        stage_c_shared_learning_rate: Optional[float] = None,
+        stage_c_diffusion_learning_rate: Optional[float] = None,
         weight_decay: float = 1e-4,
         clip_grad: float = 1.0,
         posterior_warmup_epochs: Optional[int] = None,
@@ -141,11 +171,18 @@ class TrainingConfig:
     ):
         self.batch_size = batch_size
         self.learning_rate = learning_rate if learning_rate is not None else (lr if lr is not None else 3e-4)
+        self.stage_a_learning_rate = stage_a_learning_rate if stage_a_learning_rate is not None else self.learning_rate
+        self.stage_b_prior_learning_rate = stage_b_prior_learning_rate if stage_b_prior_learning_rate is not None else self.learning_rate
+        self.stage_b_context_learning_rate = stage_b_context_learning_rate if stage_b_context_learning_rate is not None else 1e-5
+        self.stage_c_prior_learning_rate = stage_c_prior_learning_rate if stage_c_prior_learning_rate is not None else 1e-4
+        self.stage_c_shared_learning_rate = stage_c_shared_learning_rate if stage_c_shared_learning_rate is not None else 1e-5
+        self.stage_c_diffusion_learning_rate = stage_c_diffusion_learning_rate if stage_c_diffusion_learning_rate is not None else 1e-6
+
         self.weight_decay = weight_decay
         self.clip_grad = clip_grad
 
-        self.posterior_warmup_epochs = posterior_warmup_epochs if posterior_warmup_epochs is not None else (epochs_stage_a if epochs_stage_a is not None else 10)
-        self.prior_alignment_epochs = prior_alignment_epochs if prior_alignment_epochs is not None else (epochs_stage_b if epochs_stage_b is not None else 20)
+        self.posterior_warmup_epochs = posterior_warmup_epochs if posterior_warmup_epochs is not None else (epochs_stage_a if epochs_stage_a is not None else 20)
+        self.prior_alignment_epochs = prior_alignment_epochs if prior_alignment_epochs is not None else (epochs_stage_b if epochs_stage_b is not None else 50)
         self.forecast_refinement_epochs = forecast_refinement_epochs if forecast_refinement_epochs is not None else (epochs_stage_c if epochs_stage_c is not None else 20)
 
         self.num_workers = num_workers
@@ -180,6 +217,7 @@ class Config:
     model: ModelConfig = field(default_factory=ModelConfig)
     loss: LossConfig = field(default_factory=LossConfig)
     training: TrainingConfig = field(default_factory=TrainingConfig)
+    stability: StabilityConfig = field(default_factory=StabilityConfig)
 
 
 def load_config(yaml_path: str) -> Config:
@@ -192,8 +230,9 @@ def load_config(yaml_path: str) -> Config:
     model_raw = cfg_dict.get("model", {})
     loss_raw = cfg_dict.get("loss", {})
     train_raw = cfg_dict.get("training", {})
+    stability_raw = cfg_dict.get("stability", {})
 
-    if not any(k in cfg_dict for k in ["data", "model", "loss", "training"]):
+    if not any(k in cfg_dict for k in ["data", "model", "loss", "training", "stability"]):
         data_raw = {
             "dataset_name": cfg_dict.get("dataset_name", "incart"),
             "data_dir": cfg_dict.get("data_dir", "data/incart"),
@@ -218,8 +257,8 @@ def load_config(yaml_path: str) -> Config:
             "learning_rate": cfg_dict.get("learning_rate", 3e-4),
             "weight_decay": cfg_dict.get("weight_decay", 1e-4),
             "clip_grad": cfg_dict.get("clip_grad", 1.0),
-            "posterior_warmup_epochs": cfg_dict.get("posterior_warmup_epochs", 10),
-            "prior_alignment_epochs": cfg_dict.get("prior_alignment_epochs", 20),
+            "posterior_warmup_epochs": cfg_dict.get("posterior_warmup_epochs", 20),
+            "prior_alignment_epochs": cfg_dict.get("prior_alignment_epochs", 50),
             "forecast_refinement_epochs": cfg_dict.get("forecast_refinement_epochs", 20),
             "num_workers": cfg_dict.get("num_workers", 0),
             "mixed_precision": cfg_dict.get("mixed_precision", False),
@@ -238,10 +277,12 @@ def load_config(yaml_path: str) -> Config:
     model_cfg = ModelConfig(**model_raw)
     loss_cfg = LossConfig(**loss_raw)
     training_cfg = TrainingConfig(**train_raw)
+    stability_cfg = StabilityConfig(**stability_raw)
 
     return Config(
         data=data_cfg,
         model=model_cfg,
         loss=loss_cfg,
         training=training_cfg,
+        stability=stability_cfg,
     )

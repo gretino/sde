@@ -21,12 +21,20 @@ class EmissionDecoder(nn.Module):
             nn.Linear(256, 4 * num_leads),
         )
 
-        # Learned observation log-scale per lead initialized to softplus parameter ~0.1
-        self.raw_obs_log_scale = nn.Parameter(torch.full((num_leads,), -2.3))
+        self.raw_obs_log_scale = nn.Parameter(torch.full((num_leads,), 0.0))
+        self.stage = "A"
+
+    def set_stage(self, stage: str):
+        self.stage = stage.upper()
 
     @property
     def observation_scale(self) -> torch.Tensor:
-        return (1e-3 + F.softplus(self.raw_obs_log_scale)).clamp(min=0.01, max=2.0)
+        if self.stage in ["A", "B"]:
+            # Fixed observation scale 0.10 during Stage A and B (Section 6)
+            return torch.full((self.num_leads,), 0.10, device=self.raw_obs_log_scale.device)
+        else:
+            # Stage C bounded learnable scale: 0.03 + 0.27 * sigmoid(raw_scale) -> range [0.03, 0.30]
+            return 0.03 + 0.27 * torch.sigmoid(self.raw_obs_log_scale)
 
     def forward(self, latent_path: torch.Tensor, context_summary: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """

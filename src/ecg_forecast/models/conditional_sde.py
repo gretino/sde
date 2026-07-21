@@ -37,13 +37,18 @@ class SDEFunc(nn.Module):
             nn.Linear(128, latent_dim),
         )
 
-        # Learnable diagonal diffusion initialized to ~0.03 (softplus(-3.5) + 1e-4 approx 0.0303)
-        self.raw_sigma = nn.Parameter(torch.full((latent_dim,), -3.5))
+        # Learnable diagonal diffusion for Stage C
+        self.raw_sigma = nn.Parameter(torch.full((latent_dim,), 0.0))
+        self.register_buffer("fixed_sigma", torch.full((latent_dim,), 0.01))
+        self.stage = "A"
 
         # Context and recognition features passed before sdeint call
         self._mode = "posterior"
         self._context_summary: Optional[torch.Tensor] = None
         self._recognition_path: Optional[torch.Tensor] = None
+
+    def set_stage(self, stage: str):
+        self.stage = stage.upper()
 
     def set_context(
         self,
@@ -57,17 +62,22 @@ class SDEFunc(nn.Module):
 
     @property
     def sigma(self) -> torch.Tensor:
-        return 1e-4 + F.softplus(self.raw_sigma)
+        if self.stage in ["A", "B"]:
+            # Fixed diffusion 0.01 during Stage A and B (Section 5)
+            return self.fixed_sigma
+        else:
+            # Stage C bounded learnable diffusion: 0.005 + 0.045 * sigmoid(raw_sigma) -> range [0.005, 0.050]
+            return 0.005 + 0.045 * torch.sigmoid(self.raw_sigma)
 
     def _interpolate_recognition(self, t: torch.Tensor, batch_size: int, device: torch.device) -> torch.Tensor:
         if self._recognition_path is None:
             return torch.zeros((batch_size, self.context_dim), device=device)
 
-        # Map t in [0, 2.0] to float index in [0, 49]
+        # Map t in [0, 2.0] to float index in [0, 49] with boundary clamping
         t_scalar = float(t) if isinstance(t, (int, float)) else t.item() if t.numel() == 1 else float(t[0])
         idx_float = (t_scalar / 2.0) * 49.0
-        idx_low = int(math.floor(idx_float))
-        idx_high = min(idx_low + 1, 49)
+        idx_low = min(max(0, int(math.floor(idx_float))), 49)
+        idx_high = min(49, idx_low + 1)
         weight_high = idx_float - idx_low
         weight_low = 1.0 - weight_high
 
@@ -113,6 +123,9 @@ class ConditionalLatentSDE(nn.Module):
         self.context_dim = context_dim
         self.dt = dt
         self.sde_func = SDEFunc(latent_dim=latent_dim, context_dim=context_dim)
+
+    def set_stage(self, stage: str):
+        self.sde_func.set_stage(stage)
 
     def integrate(
         self,
@@ -178,17 +191,18 @@ class ConditionalLatentSDE(nn.Module):
         if mode == "posterior" and recognition_path is not None:
             sigma = self.sde_func.sigma
             num_steps = ts.size(0)
-            dt_step = 2.0 / num_steps
             diff_sq_sum = 0.0
 
             for k in range(num_steps):
                 tk = ts[k]
                 zk = latent_path[:, k, :]
-                f_k = self.sde_func.f(tk, zk).detach()
+                f_k = self.sde_func.f(tk, zk)
                 h_k = self.sde_func.h(tk, zk)
-                drift_diff = (f_k - h_k) / sigma.unsqueeze(0)
-                diff_sq_sum = diff_sq_sum + 0.5 * torch.mean(drift_diff ** 2, dim=-1)
+                drift_ratio_sq = ((f_k - h_k) / sigma.unsqueeze(0)).pow(2)
+                diff_sq_sum = diff_sq_sum + drift_ratio_sq.mean()
 
-            path_kl = (diff_sq_sum * dt_step).mean()
+            # Normalized path KL over batch, time, and latent dimensions (Section 4.2)
+            forecast_duration = 2.0
+            path_kl = 0.5 * (diff_sq_sum / float(num_steps)) * forecast_duration
 
         return latent_path, path_kl
