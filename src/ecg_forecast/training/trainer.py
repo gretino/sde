@@ -258,13 +258,15 @@ class Trainer:
             "loss": [],
             "prior_nll": [],
             "prior_morphology_loss": [],
-            "initial_teacher_loss": [],
+            "trajectory_loss": [],
+            "initial_mean_loss": [],
             "drift_teacher_loss": [],
             "prior_latent_temporal_std": [],
         }
 
-        w_init = self.config.loss.stage_b_initial_teacher_weight
-        w_drift = self.config.loss.stage_b_drift_teacher_weight
+        w_traj = getattr(self.config.loss, "lambda_trajectory", 1.0)
+        w_z0 = getattr(self.config.loss, "lambda_z0", 0.1)
+        w_drift = getattr(self.config.loss, "lambda_drift", 0.01)
 
         for batch in tqdm(self.train_loader, desc=f"Train Stage B Epoch {epoch_in_stage+1}", leave=False):
             c_wf = batch["context_waveform"].to(self.device, non_blocking=True)
@@ -274,19 +276,22 @@ class Trainer:
 
             self.optimizer.zero_grad(set_to_none=True)
 
-            # 1. Run Detached Posterior Teacher Pass (Section 8.5)
+            # 1. Run Detached Posterior Teacher Pass in Deterministic Mode (mu_q, zero diffusion)
             with torch.no_grad():
                 c_summary_t, _, _, _ = unwrapped.context_encoder(c_wf)
                 full_wf = torch.cat([c_wf, f_wf], dim=1)
                 post_summary, rec_path, post_mean_det, post_logvar_det = unwrapped.posterior_encoder(full_wf, c_summary_t)
-                z0_post = unwrapped._reparameterize(post_mean_det, post_logvar_det)
 
                 ts = f_times[0, ::4] if f_times.dim() == 2 else f_times[::4]
+
+                # Force zero diffusion for deterministic teacher path
+                raw_sigma_orig = unwrapped.sde.sde_func.raw_sigma.data.clone()
+                unwrapped.sde.sde_func.raw_sigma.data.fill_(-100.0)
+
                 post_latent_path, _ = unwrapped.sde.integrate(
-                    z0=z0_post, ts=ts, context_summary=c_summary_t, recognition_path=rec_path, mode="posterior"
+                    z0=post_mean_det, ts=ts, context_summary=c_summary_t, recognition_path=rec_path, mode="posterior"
                 )
 
-                # Compute posterior drift values along teacher latent path
                 num_steps = ts.size(0)
                 post_drifts = []
                 for k in range(num_steps):
@@ -295,17 +300,23 @@ class Trainer:
                     post_drifts.append(unwrapped.sde.sde_func.f(tk, zk))
                 post_drifts_det = torch.stack(post_drifts, dim=1).detach()
 
-            # 2. Run Prior Student Pass (Section 8.6)
+                unwrapped.sde.sde_func.raw_sigma.data.copy_(raw_sigma_orig)
+
+            # 2. Run Deterministic Prior Student Pass (z0 = mu_p, zero diffusion)
             with torch.amp.autocast("cuda", enabled=self.use_amp):
                 c_summary, c_tokens, prior_mean, prior_logvar = unwrapped.context_encoder(c_wf)
-                z0_prior = unwrapped._reparameterize(prior_mean, prior_logvar)
 
+                # Deterministic integration
+                unwrapped.sde.sde_func.raw_sigma.data.fill_(-100.0)
                 prior_latent_path, _ = unwrapped.sde.integrate(
-                    z0=z0_prior, ts=ts, context_summary=c_summary, mode="prior"
+                    z0=prior_mean, ts=ts, context_summary=c_summary, mode="prior"
                 )
-                prior_wf_mean, prior_scale = unwrapped.decoder(prior_latent_path, c_summary)
+                unwrapped.sde.sde_func.raw_sigma.data.copy_(raw_sigma_orig)
 
-                # Prior drift on detached teacher latent path (Section 8.8)
+                prior_wf_mean, prior_scale = unwrapped.decoder(prior_latent_path, c_summary, target_len=f_wf.size(1))
+
+
+                # Prior drift on detached teacher states
                 prior_drifts_on_teacher = []
                 for k in range(num_steps):
                     tk = ts[k]
@@ -323,10 +334,21 @@ class Trainer:
                 )
                 prior_waveform_loss = prior_nll + prior_morph
 
-                init_teacher_loss = compute_initial_teacher_loss(prior_mean, prior_logvar, post_mean_det, post_logvar_det)
+                # Optional R-peak timing rhythm supervision (Section 10)
+                if "future_r_peaks" in batch and len(batch["future_r_peaks"]) > 0:
+                    from ..losses.morphology import compute_rhythm_loss
+                    pred_r_prob = unwrapped.predict_r_peak_probability(prior_latent_path)
+                    rhythm_loss = compute_rhythm_loss(pred_r_prob, batch["future_r_peaks"])
+                    w_rhythm = getattr(self.config.loss, "lambda_rhythm", 0.5)
+                    prior_waveform_loss = prior_waveform_loss + w_rhythm * rhythm_loss
+
+                from ..losses.elbo import compute_autonomous_trajectory_loss, compute_initial_mean_loss
+                traj_loss = compute_autonomous_trajectory_loss(prior_latent_path, post_latent_path)
+                z0_loss = compute_initial_mean_loss(prior_mean, post_mean_det)
                 drift_teacher_loss = compute_drift_teacher_loss(prior_drifts_det, post_drifts_det)
 
-                total_loss = prior_waveform_loss + w_init * init_teacher_loss + w_drift * drift_teacher_loss
+
+                total_loss = prior_waveform_loss + w_traj * traj_loss + w_z0 * z0_loss + w_drift * drift_teacher_loss
 
             if self.use_amp:
                 self.scaler.scale(total_loss).backward()
@@ -345,7 +367,8 @@ class Trainer:
             epoch_metrics["loss"].append(float(total_loss.item()))
             epoch_metrics["prior_nll"].append(float(prior_nll.item()))
             epoch_metrics["prior_morphology_loss"].append(prior_morph_dict["morphology_loss"])
-            epoch_metrics["initial_teacher_loss"].append(float(init_teacher_loss.item()))
+            epoch_metrics["trajectory_loss"].append(float(traj_loss.item()))
+            epoch_metrics["initial_mean_loss"].append(float(z0_loss.item()))
             epoch_metrics["drift_teacher_loss"].append(float(drift_teacher_loss.item()))
             epoch_metrics["prior_latent_temporal_std"].append(float(latent_std.item()))
 
@@ -411,7 +434,7 @@ class Trainer:
                 )
                 post_wf_loss = post_nll + post_morph
 
-                # Prior pass
+                # Prior stochastic pass
                 prior_dict = self.model(
                     context_waveform=c_wf,
                     context_times=c_times,
@@ -428,12 +451,26 @@ class Trainer:
                 )
                 prior_wf_loss = prior_nll + prior_morph
 
+                # Prior deterministic mean anchor pass (Section 13)
+                c_summary, _, prior_mean, _ = unwrapped.context_encoder(c_wf)
+                ts = f_times[0, ::4] if f_times.dim() == 2 else f_times[::4]
+
+                raw_sigma_orig = unwrapped.sde.sde_func.raw_sigma.data.clone()
+                unwrapped.sde.sde_func.raw_sigma.data.fill_(-100.0)
+                mean_latent, _ = unwrapped.sde.integrate(z0=prior_mean, ts=ts, context_summary=c_summary, mode="prior")
+                unwrapped.sde.sde_func.raw_sigma.data.copy_(raw_sigma_orig)
+
+                mean_wf, mean_scale = unwrapped.decoder(mean_latent, c_summary)
+                mean_nll = compute_laplace_nll(mean_wf, f_wf, mean_scale)
+                mean_morph, _ = compute_morphology_loss(mean_wf, f_wf)
+                prior_mean_anchor_loss = mean_nll + mean_morph
+
                 init_kl = post_out.initial_kl.mean()
                 path_kl = post_out.path_kl.mean()
 
                 w_init_kl = beta_init * init_kl
                 w_path_kl = beta_path * path_kl
-                waveform_objective = post_wf_loss + prior_wf_loss
+                waveform_objective = post_wf_loss + prior_wf_loss + prior_mean_anchor_loss
                 kl_ratio = compute_weighted_kl_ratio(float(w_init_kl.item()), float(w_path_kl.item()), float(waveform_objective.item()))
 
                 # Enforce max_weighted_kl_ratio <= 0.20 (Section 9.5 & 11.5)
@@ -441,7 +478,8 @@ class Trainer:
                     w_init_kl = w_init_kl * (self.config.loss.max_weighted_kl_ratio / max(1e-8, kl_ratio))
                     w_path_kl = w_path_kl * (self.config.loss.max_weighted_kl_ratio / max(1e-8, kl_ratio))
 
-                total_loss = post_wf_loss + prior_wf_loss + w_init_kl + w_path_kl
+                total_loss = post_wf_loss + prior_wf_loss + 0.5 * prior_mean_anchor_loss + w_init_kl + w_path_kl
+
 
             if self.use_amp:
                 self.scaler.scale(total_loss).backward()

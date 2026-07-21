@@ -1,4 +1,4 @@
-from typing import Tuple
+from typing import Tuple, Dict
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -21,9 +21,9 @@ class Conv1dCausalBlock(nn.Module):
 
 
 class ContextEncoder(nn.Module):
-    """Causal 1D Residual CNN context encoder.
+    """Boundary-Aware Causal 1D Residual CNN context encoder.
     Downsamples 500-sample context window @ 100 Hz to 125 tokens @ 25 Hz.
-    Feature channel width is controlled by context_dim (e.g. 64 or 128).
+    Outputs global_summary, boundary_token, and recent_summary for cardiac boundary phase preservation.
     """
 
     def __init__(self, num_leads: int = 12, context_dim: int = 128, latent_dim: int = 32):
@@ -46,16 +46,26 @@ class ContextEncoder(nn.Module):
             nn.Linear(64, 1),
         )
 
+        # Dynamic context projection from [global, boundary, recent] (3 * context_dim) to context_dim
+        self.dynamic_proj = nn.Linear(context_dim * 3, context_dim)
+
         # Projections to prior initial state p(z_0)
         self.fc_mean = nn.Linear(context_dim, latent_dim)
         self.fc_logvar = nn.Linear(context_dim, latent_dim)
+
+    def get_dynamic_context(self, context_tokens: torch.Tensor, global_summary: torch.Tensor) -> torch.Tensor:
+        """Constructs boundary-aware dynamic context c_dynamic = [global_summary, boundary_token, recent_summary]."""
+        boundary_token = context_tokens[:, -1, :]  # Final context token at t=0
+        recent_summary = context_tokens[:, -25:, :].mean(dim=1)  # Mean over final 1 second (25 tokens)
+        concat_feats = torch.cat([global_summary, boundary_token, recent_summary], dim=-1)
+        return F.gelu(self.dynamic_proj(concat_feats))
 
     def forward(self, context_waveform: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Args:
             context_waveform: [B, 500, num_leads]
         Returns:
-            context_summary: [B, context_dim]
+            context_summary: [B, context_dim] (dynamic boundary-aware summary)
             context_tokens: [B, 125, context_dim]
             prior_mean: [B, latent_dim]
             prior_logvar: [B, latent_dim]
@@ -74,7 +84,10 @@ class ContextEncoder(nn.Module):
 
         # Attention pooling
         weights = F.softmax(self.attn_net(context_tokens), dim=1)  # [B, 125, 1]
-        context_summary = (context_tokens * weights).sum(dim=1)    # [B, context_dim]
+        global_summary = (context_tokens * weights).sum(dim=1)     # [B, context_dim]
+
+        # Boundary-aware dynamic context summary
+        context_summary = self.get_dynamic_context(context_tokens, global_summary)
 
         # Prior initial state parameterization
         prior_mean = self.fc_mean(context_summary)

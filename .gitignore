@@ -8,6 +8,7 @@ cache/
 verification_results/
 wandb/
 checkpoints/
+artifacts/
 *.pt
 output/
 .agents/

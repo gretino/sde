@@ -60,6 +60,21 @@ class LatentSDEForecaster(nn.Module):
             latent_dim=self.latent_dim,
             context_dim=self.context_dim,
         )
+        # Section 10: Future R-peak probability head from latent path
+        self.rhythm_head = nn.Sequential(
+            nn.Conv1d(self.latent_dim, 32, kernel_size=5, padding=2),
+            nn.GELU(),
+            nn.Conv1d(32, 1, kernel_size=5, padding=2),
+        )
+
+    def predict_r_peak_probability(self, latent_path: torch.Tensor) -> torch.Tensor:
+        """Predicts future R-peak probability map [B, T_waveform] from latent trajectory."""
+        x_t = latent_path.transpose(1, 2)  # [B, latent_dim, T_latent]
+        t_target = latent_path.size(1) * 4
+        x_up = nn.functional.interpolate(x_t, size=t_target, mode="linear", align_corners=False)
+        logits = self.rhythm_head(x_up).squeeze(1)  # [B, T_waveform]
+        return torch.sigmoid(logits)
+
 
     def set_stage(self, stage: str):
         self.sde.set_stage(stage)
@@ -174,8 +189,8 @@ class LatentSDEForecaster(nn.Module):
             brownian_motion=brownian_motion,
         )
 
-        # Emission decoding
-        wf_mean, wf_scale = self.decoder(latent_path, c_summary)
+        # Emission decoding (exact target length)
+        wf_mean, wf_scale = self.decoder(latent_path, c_summary, target_len=future_waveform.size(1))
 
         return ForecastOutput(
             waveform_mean=wf_mean,
@@ -225,8 +240,10 @@ class LatentSDEForecaster(nn.Module):
             brownian_motion=brownian_motion,
         )
 
-        # Emission decoding
-        wf_mean, wf_scale = self.decoder(latent_path, c_summary)
+        # Emission decoding (exact target length)
+        target_len = future_times.size(-1) if future_times is not None else None
+        wf_mean, wf_scale = self.decoder(latent_path, c_summary, target_len=target_len)
+
 
         return ForecastOutput(
             waveform_mean=wf_mean,

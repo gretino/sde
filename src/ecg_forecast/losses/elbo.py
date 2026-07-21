@@ -79,6 +79,24 @@ def compute_drift_teacher_loss(
     return diff_sq.mean()
 
 
+def compute_autonomous_trajectory_loss(
+    prior_latent_path: torch.Tensor,
+    post_latent_path_detached: torch.Tensor,
+) -> torch.Tensor:
+    """Computes autonomous trajectory matching loss L_trajectory = (1/BTD) ||z_{1:T}^p - stopgrad(z_{1:T}^q)||_2^2."""
+    diff_sq = (prior_latent_path - post_latent_path_detached.detach()) ** 2
+    return diff_sq.mean()
+
+
+def compute_initial_mean_loss(
+    prior_mean: torch.Tensor,
+    post_mean_detached: torch.Tensor,
+) -> torch.Tensor:
+    """Computes direct initial-state mean matching loss L_{z_0} = (1/BD) ||\mu_p - stopgrad(\mu_q)||_2^2."""
+    diff_sq = (prior_mean - post_mean_detached.detach()) ** 2
+    return diff_sq.mean()
+
+
 def compute_weighted_kl_ratio(
     weighted_initial_kl: float,
     weighted_path_kl: float,
@@ -87,3 +105,4 @@ def compute_weighted_kl_ratio(
     """Computes weighted_kl_ratio = (weighted_initial_kl + weighted_path_kl) / max(1e-8, waveform_objective) (Section 4.3)."""
     denom = max(1e-8, abs(waveform_objective))
     return float((weighted_initial_kl + weighted_path_kl) / denom)
+

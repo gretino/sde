@@ -18,15 +18,19 @@ def main():
     parser.add_argument("--no-wandb", action="store_true", help="Disable WandB logging")
     parser.add_argument("--resume", type=str, default=None, help="Path to checkpoint file to resume from")
     parser.add_argument("--start_stage", type=str, choices=["A", "B", "C"], default=None, help="Stage to start/resume training from (e.g. B)")
+    parser.add_argument("--horizon_sec", type=float, default=None, help="Override future forecast horizon in seconds (e.g. 0.5, 1.0, 2.0)")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
 
     # CLI overrides
+    if args.horizon_sec is not None:
+        cfg.data.future_seconds = args.horizon_sec
     if args.batch_size is not None:
         cfg.training.batch_size = args.batch_size
     if args.num_workers is not None:
         cfg.training.num_workers = args.num_workers
+
 
     use_wandb = cfg.training.use_wandb if not args.no_wandb else False
     torch.manual_seed(cfg.training.seed)

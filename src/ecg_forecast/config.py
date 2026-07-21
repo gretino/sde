@@ -95,7 +95,11 @@ class LossConfig:
     beta_path: float = 1.0
     lambda_derivative: float = 0.5
     lambda_spectral: float = 0.1
-    stage_b_initial_teacher_weight: float = 0.01
+    lambda_rhythm: float = 0.5
+    lambda_trajectory: float = 1.0
+    lambda_z0: float = 0.1
+    lambda_drift: float = 0.01
+    stage_b_initial_teacher_weight: float = 0.1
     stage_b_drift_teacher_weight: float = 0.01
     stage_c_initial_kl_start: float = 1e-5
     stage_c_initial_kl_max: float = 1e-2
@@ -103,6 +107,8 @@ class LossConfig:
     stage_c_path_kl_max: float = 1e-3
     kl_ramp_epochs: int = 20
     max_weighted_kl_ratio: float = 0.20
+    forecast_horizon_curriculum: List[float] = field(default_factory=lambda: [0.5, 1.0, 2.0])
+
 
 
 @dataclass

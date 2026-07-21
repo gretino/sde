@@ -1,5 +1,5 @@
 import warnings
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
 import numpy as np
 import torch
 from scipy.signal import find_peaks
@@ -11,8 +11,11 @@ except ImportError:
     HAS_NEUROKIT = False
 
 
-def detect_r_peaks_lead(signal: np.ndarray, sampling_rate: int = 100) -> np.ndarray:
+def detect_r_peaks_lead(signal: np.ndarray, sampling_rate: int = 100, fs: Optional[int] = None) -> np.ndarray:
     """Detects R-peak sample indices in a 1D waveform signal safely."""
+    if fs is not None:
+        sampling_rate = fs
+
     if len(signal) < 10:
         return np.array([], dtype=np.int64)
 
@@ -36,6 +39,11 @@ def detect_r_peaks_lead(signal: np.ndarray, sampling_rate: int = 100) -> np.ndar
         distance = max(1, int(0.4 * sampling_rate))  # min 400 ms distance
         peaks, _ = find_peaks(signal, height=height, distance=distance)
         return np.array(peaks, dtype=np.int64)
+
+
+# Alias for backward compatibility and debug metrics
+detect_r_peaks = detect_r_peaks_lead
+
 
 
 def match_peaks(pred_peaks: np.ndarray, target_peaks: np.ndarray, tolerance: int = 5) -> Tuple[int, int, int]:
