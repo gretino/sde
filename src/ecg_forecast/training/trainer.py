@@ -14,7 +14,7 @@ from ..losses.schedules import get_loss_weights
 from ..metrics.waveform import compute_waveform_metrics
 from ..metrics.rhythm import compute_rhythm_metrics
 from ..visualization.forecasts import plot_lead2_forecast_panel
-from .checkpointing import save_checkpoint
+from .checkpointing import save_checkpoint, load_checkpoint
 from .logging import Logger
 
 
@@ -252,82 +252,103 @@ class Trainer:
         res["prior_forecast_score"] = res["prior_nll"] + (1.0 - res["prior_pearson"]) + (1.0 - res["prior_rpeak_f1"])
         return res
 
-    def run_training(self):
+    def run_training(self, resume_path: Optional[str] = None, start_stage: Optional[str] = None):
         ckpt_dir = self.config.training.checkpoint_dir
         os.makedirs(ckpt_dir, exist_ok=True)
         vis_dir = os.path.join(ckpt_dir, "visualizations")
         os.makedirs(vis_dir, exist_ok=True)
         unwrapped = self.get_unwrapped_model()
 
-        print("\n=== Starting Stage A: Posterior Reconstruction Warmup ===")
-        best_stage_a_nll = float("inf")
-        epochs_a = self.config.training.posterior_warmup_epochs
+        if resume_path is not None:
+            ckpt = load_checkpoint(resume_path, model=unwrapped, optimizer=self.optimizer, device=str(self.device))
+            saved_stage = ckpt.get("stage", "A")
+            saved_epoch = ckpt.get("epoch", 0)
+            print(f"\n[Trainer] Successfully loaded checkpoint from {resume_path} (Stage: {saved_stage}, Saved Epoch: {saved_epoch})")
+            if start_stage is None:
+                # Default resume behavior: if checkpoint was Stage A, resume directly into Stage B
+                if saved_stage == "A":
+                    start_stage = "B"
+                else:
+                    start_stage = saved_stage
+        
+        start_stage = (start_stage or "A").upper()
 
+        epochs_a = self.config.training.posterior_warmup_epochs
+        epochs_b = self.config.training.prior_alignment_epochs
+        epochs_c = self.config.training.forecast_refinement_epochs
         total_epoch = 0
 
-        for epoch in range(epochs_a):
-            total_epoch += 1
-            train_m = self.train_epoch(stage="A", epoch_in_stage=epoch, total_stage_epochs=epochs_a)
-            vis_path = os.path.join(vis_dir, f"stage_A_epoch{epoch+1:02d}.png")
-            val_m = self.evaluate(save_vis_path=vis_path)
+        # Stage A Loop
+        if start_stage == "A":
+            print("\n=== Starting Stage A: Posterior Reconstruction Warmup ===")
+            best_stage_a_nll = float("inf")
+            for epoch in range(epochs_a):
+                total_epoch += 1
+                train_m = self.train_epoch(stage="A", epoch_in_stage=epoch, total_stage_epochs=epochs_a)
+                vis_path = os.path.join(vis_dir, f"stage_A_epoch{epoch+1:02d}.png")
+                val_m = self.evaluate(save_vis_path=vis_path)
 
-            step_metrics = {**train_m, **val_m}
-            self.logger.log_summary("A", epoch + 1, step_metrics)
-            print(f"  [R-peak Detection] {int(val_m['zero_peaks_count'])} zero-peak forecasts out of val set ({val_m['zero_peaks_pct']:.1f}%)")
-            self.logger.log(step_metrics, step=total_epoch)
-            self.logger.log_image("stage_A_visualization", vis_path, step=total_epoch)
+                step_metrics = {**train_m, **val_m}
+                self.logger.log_summary("A", epoch + 1, step_metrics)
+                print(f"  [R-peak Detection] {int(val_m['zero_peaks_count'])} zero-peak forecasts out of val set ({val_m['zero_peaks_pct']:.1f}%)")
+                self.logger.log(step_metrics, step=total_epoch)
+                self.logger.log_image("stage_A_visualization", vis_path, step=total_epoch)
 
-            if val_m["post_nll"] < best_stage_a_nll:
-                best_stage_a_nll = val_m["post_nll"]
-                save_checkpoint(
-                    path=os.path.join(ckpt_dir, "posterior_warmup_best.pt"),
-                    model=unwrapped,
-                    optimizer=self.optimizer,
-                    epoch=epoch + 1,
-                    stage="A",
-                    metrics=val_m,
-                    global_step=self.global_step,
-                    config=self.config,
-                    record_splits=self.record_splits,
-                )
+                if val_m["post_nll"] < best_stage_a_nll:
+                    best_stage_a_nll = val_m["post_nll"]
+                    save_checkpoint(
+                        path=os.path.join(ckpt_dir, "posterior_warmup_best.pt"),
+                        model=unwrapped,
+                        optimizer=self.optimizer,
+                        epoch=epoch + 1,
+                        stage="A",
+                        metrics=val_m,
+                        global_step=self.global_step,
+                        config=self.config,
+                        record_splits=self.record_splits,
+                    )
+        else:
+            print(f"\n[Trainer] Skipping Stage A (Resuming from Stage {start_stage})")
+            total_epoch += epochs_a
 
-        print("\n=== Starting Stage B: Prior Alignment ===")
-        best_stage_b_score = float("inf")
-        epochs_b = self.config.training.prior_alignment_epochs
+        # Stage B Loop
+        if start_stage in ["A", "B"]:
+            print("\n=== Starting Stage B: Prior Alignment ===")
+            best_stage_b_score = float("inf")
+            for epoch in range(epochs_b):
+                total_epoch += 1
+                train_m = self.train_epoch(stage="B", epoch_in_stage=epoch, total_stage_epochs=epochs_b)
+                vis_path = os.path.join(vis_dir, f"stage_B_epoch{epoch+1:02d}.png")
+                val_m = self.evaluate(save_vis_path=vis_path)
 
-        for epoch in range(epochs_b):
-            total_epoch += 1
-            train_m = self.train_epoch(stage="B", epoch_in_stage=epoch, total_stage_epochs=epochs_b)
-            vis_path = os.path.join(vis_dir, f"stage_B_epoch{epoch+1:02d}.png")
-            val_m = self.evaluate(save_vis_path=vis_path)
+                step_metrics = {**train_m, **val_m}
+                self.logger.log_summary("B", epoch + 1, step_metrics)
+                print(f"  [R-peak Detection] {int(val_m['zero_peaks_count'])} zero-peak forecasts out of val set ({val_m['zero_peaks_pct']:.1f}%)")
+                self.logger.log(step_metrics, step=total_epoch)
+                self.logger.log_image("stage_B_visualization", vis_path, step=total_epoch)
 
-            step_metrics = {**train_m, **val_m}
-            self.logger.log_summary("B", epoch + 1, step_metrics)
-            print(f"  [R-peak Detection] {int(val_m['zero_peaks_count'])} zero-peak forecasts out of val set ({val_m['zero_peaks_pct']:.1f}%)")
-            self.logger.log(step_metrics, step=total_epoch)
-            self.logger.log_image("stage_B_visualization", vis_path, step=total_epoch)
+                if val_m["prior_forecast_score"] < best_stage_b_score:
+                    best_stage_b_score = val_m["prior_forecast_score"]
+                    save_checkpoint(
+                        path=os.path.join(ckpt_dir, "prior_alignment_best.pt"),
+                        model=unwrapped,
+                        optimizer=self.optimizer,
+                        epoch=epoch + 1,
+                        stage="B",
+                        metrics=val_m,
+                        global_step=self.global_step,
+                        config=self.config,
+                        record_splits=self.record_splits,
+                    )
+        else:
+            total_epoch += epochs_b
 
-            if val_m["prior_forecast_score"] < best_stage_b_score:
-                best_stage_b_score = val_m["prior_forecast_score"]
-                save_checkpoint(
-                    path=os.path.join(ckpt_dir, "prior_alignment_best.pt"),
-                    model=unwrapped,
-                    optimizer=self.optimizer,
-                    epoch=epoch + 1,
-                    stage="B",
-                    metrics=val_m,
-                    global_step=self.global_step,
-                    config=self.config,
-                    record_splits=self.record_splits,
-                )
-
+        # Stage C Loop
         print("\n=== Starting Stage C: Forecast Refinement ===")
         for param_group in self.optimizer.param_groups:
             param_group["lr"] = self.config.training.learning_rate * 0.1
 
         best_stage_c_score = float("inf")
-        epochs_c = self.config.training.forecast_refinement_epochs
-
         for epoch in range(epochs_c):
             total_epoch += 1
             train_m = self.train_epoch(stage="C", epoch_in_stage=epoch, total_stage_epochs=epochs_c)

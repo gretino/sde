@@ -79,7 +79,7 @@ class LatentSDEForecaster(nn.Module):
         kl = 0.5 * (
             p_logvar - q_logvar + (var_q + (q_mean - p_mean) ** 2) / var_p - 1.0
         )
-        return kl.sum(dim=-1).mean()
+        return kl.mean(dim=-1).mean()
 
     def forward(
         self,

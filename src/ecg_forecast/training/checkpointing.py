@@ -41,7 +41,10 @@ def load_checkpoint(
     device: str = "cpu",
 ) -> Dict[str, Any]:
     """Loads checkpoint matching Section 13 specification into model, optimizer, and scheduler."""
-    checkpoint = torch.load(path, map_location=device)
+    try:
+        checkpoint = torch.load(path, map_location=device, weights_only=False)
+    except TypeError:
+        checkpoint = torch.load(path, map_location=device)
     model.load_state_dict(checkpoint["model_state_dict"])
     if optimizer is not None and checkpoint.get("optimizer_state_dict") is not None:
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])

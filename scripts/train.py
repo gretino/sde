@@ -16,6 +16,8 @@ def main():
     parser.add_argument("--batch_size", type=int, default=None, help="Override batch size")
     parser.add_argument("--num_workers", type=int, default=None, help="Override num workers")
     parser.add_argument("--no-wandb", action="store_true", help="Disable WandB logging")
+    parser.add_argument("--resume", type=str, default=None, help="Path to checkpoint file to resume from")
+    parser.add_argument("--start_stage", type=str, choices=["A", "B", "C"], default=None, help="Stage to start/resume training from (e.g. B)")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -69,7 +71,7 @@ def main():
         use_wandb=use_wandb,
     )
 
-    trainer.run_training()
+    trainer.run_training(resume_path=args.resume, start_stage=args.start_stage)
 
 
 if __name__ == "__main__":

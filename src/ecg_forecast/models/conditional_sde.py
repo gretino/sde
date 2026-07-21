@@ -184,10 +184,10 @@ class ConditionalLatentSDE(nn.Module):
             for k in range(num_steps):
                 tk = ts[k]
                 zk = latent_path[:, k, :]
-                f_k = self.sde_func.f(tk, zk)
+                f_k = self.sde_func.f(tk, zk).detach()
                 h_k = self.sde_func.h(tk, zk)
                 drift_diff = (f_k - h_k) / sigma.unsqueeze(0)
-                diff_sq_sum = diff_sq_sum + 0.5 * torch.sum(drift_diff ** 2, dim=-1)
+                diff_sq_sum = diff_sq_sum + 0.5 * torch.mean(drift_diff ** 2, dim=-1)
 
             path_kl = (diff_sq_sum * dt_step).mean()
 
