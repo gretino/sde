@@ -22,10 +22,13 @@ def load_forecaster_checkpoint(
             f"Cannot load forecaster model."
         )
 
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    try:
+        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    except TypeError:
+        checkpoint = torch.load(checkpoint_path, map_location=device)
 
     if config is None:
-        if "config" in checkpoint:
+        if "config" in checkpoint and checkpoint["config"] is not None:
             config = checkpoint["config"]
         else:
             config = Config()

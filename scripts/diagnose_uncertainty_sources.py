@@ -51,7 +51,10 @@ def main():
     }
 
     n_samples = args.num_samples
-    ts = torch.linspace(0.04, 2.0, 50, device=device)
+    horizon_sec = f_wf.size(1) / 100.0
+    t_latent = int(round(horizon_sec * 25))
+    ts = torch.linspace(0.04, horizon_sec, t_latent, device=device)
+    t_target = f_wf.size(1)
 
     # Expanded context summary for n_samples
     c_summary_rep = c_summary.repeat(n_samples, 1)
@@ -68,7 +71,7 @@ def main():
         lat_init_only, _ = model.sde.integrate(
             z0=z0_init_only, ts=ts, context_summary=c_summary_rep, mode="prior"
         )
-        wf_init_only, _ = model.decoder(lat_init_only, c_summary_rep)
+        wf_init_only, _ = model.decoder(lat_init_only, c_summary_rep, target_len=t_target)
 
         # Restore original sigma
         model.sde.sde_func.raw_sigma.data.copy_(raw_sigma_orig)
@@ -85,7 +88,7 @@ def main():
         lat_brownian_only, _ = model.sde.integrate(
             z0=z0_det, ts=ts, context_summary=c_summary_rep, mode="prior"
         )
-        wf_brownian_only, _ = model.decoder(lat_brownian_only, c_summary_rep)
+        wf_brownian_only, _ = model.decoder(lat_brownian_only, c_summary_rep, target_len=t_target)
 
     m_brownian_only = compute_uncertainty_debug_metrics(
         samples_waveform=wf_brownian_only,
@@ -98,7 +101,8 @@ def main():
         lat_combined, _ = model.sde.integrate(
             z0=z0_init_only, ts=ts, context_summary=c_summary_rep, mode="prior"
         )
-        wf_combined, _ = model.decoder(lat_combined, c_summary_rep)
+        wf_combined, _ = model.decoder(lat_combined, c_summary_rep, target_len=t_target)
+
 
     m_combined = compute_uncertainty_debug_metrics(
         samples_waveform=wf_combined,

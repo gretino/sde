@@ -69,7 +69,9 @@ def main():
         full_wf = torch.cat([c_wf, f_wf], dim=1)
         _, rec_path, post_mean, _ = model.posterior_encoder(full_wf, c_summary)
 
-        ts = torch.linspace(0.04, 2.0, 50, device=device)
+        horizon_sec = f_wf.size(1) / 100.0
+        t_latent = int(round(horizon_sec * 25))
+        ts = torch.linspace(0.04, horizon_sec, t_latent, device=device)
         with torch.no_grad():
             post_latent, _ = model.sde.integrate(
                 z0=post_mean, ts=ts, context_summary=c_summary, recognition_path=rec_path, mode="posterior"
@@ -82,7 +84,8 @@ def main():
         lat_req = post_latent.detach().clone().requires_grad_(True)
         ctx_req = c_summary.detach().clone().requires_grad_(True)
 
-        wf_pred, _ = model.decoder(lat_req, ctx_req)
+        wf_pred, _ = model.decoder(lat_req, ctx_req, target_len=f_wf.size(1))
+
         loss_dummy = wf_pred.sum()
         loss_dummy.backward()
 
@@ -93,28 +96,30 @@ def main():
 
         # 2. Evaluate Ablations
         with torch.no_grad():
+            t_target = f_wf.size(1)
             # A1: posterior_latent + correct_context
-            wf1, _ = model.decoder(post_latent, c_summary)
+            wf1, _ = model.decoder(post_latent, c_summary, target_len=t_target)
 
             # A2: posterior_latent + zero_context
-            wf2, _ = model.decoder(post_latent, torch.zeros_like(c_summary))
+            wf2, _ = model.decoder(post_latent, torch.zeros_like(c_summary), target_len=t_target)
 
             # A3: zero_latent + correct_context
-            wf3, _ = model.decoder(torch.zeros_like(post_latent), c_summary)
+            wf3, _ = model.decoder(torch.zeros_like(post_latent), c_summary, target_len=t_target)
 
             # A4: time_shuffled_posterior_latent + correct_context
             perm_t = torch.randperm(post_latent.size(1))
-            wf4, _ = model.decoder(post_latent[:, perm_t, :], c_summary)
+            wf4, _ = model.decoder(post_latent[:, perm_t, :], c_summary, target_len=t_target)
 
             # A5: batch_shuffled_posterior_latent + correct_context
             perm_b = torch.randperm(b)
-            wf5, _ = model.decoder(post_latent[perm_b], c_summary)
+            wf5, _ = model.decoder(post_latent[perm_b], c_summary, target_len=t_target)
 
             # A6: posterior_latent + batch_shuffled_context
-            wf6, _ = model.decoder(post_latent, c_summary[perm_b])
+            wf6, _ = model.decoder(post_latent, c_summary[perm_b], target_len=t_target)
 
             # A7: prior_latent + correct_context
-            wf7, _ = model.decoder(prior_latent, c_summary)
+            wf7, _ = model.decoder(prior_latent, c_summary, target_len=t_target)
+
 
             abl_preds = [wf1, wf2, wf3, wf4, wf5, wf6, wf7]
             for idx, abl_name in enumerate(ablations):

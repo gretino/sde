@@ -77,15 +77,16 @@ def create_soft_rpeak_target(
 
 
 def compute_rhythm_loss(
-    pred_r_prob: torch.Tensor,
+    pred_r_logits: torch.Tensor,
     r_peaks_list: list,
     sigma_samples: float = 3.0,
 ) -> torch.Tensor:
-    """Computes Binary Cross Entropy loss between predicted R-peak probability map and soft Gaussian targets."""
-    b, time_len = pred_r_prob.shape
-    target_map = create_soft_rpeak_target(r_peaks_list, time_len=time_len, sigma_samples=sigma_samples, device=pred_r_prob.device)
-    bce = torch.nn.functional.binary_cross_entropy(pred_r_prob, target_map)
+    """Computes AMP-safe Binary Cross Entropy with logits loss between predicted R-peak logits and soft Gaussian targets."""
+    b, time_len = pred_r_logits.shape
+    target_map = create_soft_rpeak_target(r_peaks_list, time_len=time_len, sigma_samples=sigma_samples, device=pred_r_logits.device)
+    bce = torch.nn.functional.binary_cross_entropy_with_logits(pred_r_logits.float(), target_map.float())
     return bce
+
 
 
 def compute_morphology_loss(

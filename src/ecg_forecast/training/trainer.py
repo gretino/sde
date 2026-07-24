@@ -158,32 +158,29 @@ class Trainer:
         unwrapped = self.get_unwrapped_model()
         self.set_stage_c_trainable_modules()
 
-        prior_params = list(unwrapped.context_encoder.fc_mean.parameters()) + \
-                       list(unwrapped.context_encoder.fc_logvar.parameters()) + \
-                       list(unwrapped.sde.sde_func.prior_drift_net.parameters())
-        
-        shared_params = list(unwrapped.context_encoder.conv1.parameters()) + \
-                        list(unwrapped.context_encoder.res1.parameters()) + \
-                        list(unwrapped.context_encoder.conv2.parameters()) + \
-                        list(unwrapped.context_encoder.res2.parameters()) + \
-                        list(unwrapped.context_encoder.res3.parameters()) + \
-                        list(unwrapped.context_encoder.attn_net.parameters()) + \
-                        list(unwrapped.posterior_encoder.parameters()) + \
-                        list(unwrapped.sde.sde_func.posterior_drift_net.parameters()) + \
-                        list(unwrapped.decoder.net.parameters())
+        prior_params_set = set(unwrapped.context_encoder.fc_mean.parameters()) | \
+                           set(unwrapped.context_encoder.fc_logvar.parameters()) | \
+                           set(unwrapped.sde.sde_func.prior_drift_net.parameters())
 
-        stability_params = [unwrapped.sde.sde_func.raw_sigma, unwrapped.decoder.raw_obs_log_scale]
+        stability_params_set = {unwrapped.sde.sde_func.raw_sigma, unwrapped.decoder.raw_obs_log_scale}
+
+        all_params = [p for p in unwrapped.parameters() if p.requires_grad]
+
+        prior_params = [p for p in all_params if p in prior_params_set]
+        stability_params = [p for p in all_params if p in stability_params_set]
+        shared_params = [p for p in all_params if p not in prior_params_set and p not in stability_params_set]
 
         param_groups = [
-            {"params": [p for p in prior_params if p.requires_grad], "lr": self.config.training.stage_c_prior_learning_rate},
-            {"params": [p for p in shared_params if p.requires_grad], "lr": self.config.training.stage_c_shared_learning_rate},
-            {"params": [p for p in stability_params if p.requires_grad], "lr": self.config.training.stage_c_diffusion_learning_rate},
+            {"params": prior_params, "lr": self.config.training.stage_c_prior_learning_rate},
+            {"params": shared_params, "lr": self.config.training.stage_c_shared_learning_rate},
+            {"params": stability_params, "lr": self.config.training.stage_c_diffusion_learning_rate},
         ]
 
         optimizer = torch.optim.AdamW(
             param_groups,
             weight_decay=self.config.training.weight_decay,
         )
+
         self.optimizer = optimizer
         return optimizer
 
@@ -337,8 +334,9 @@ class Trainer:
                 # Optional R-peak timing rhythm supervision (Section 10)
                 if "future_r_peaks" in batch and len(batch["future_r_peaks"]) > 0:
                     from ..losses.morphology import compute_rhythm_loss
-                    pred_r_prob = unwrapped.predict_r_peak_probability(prior_latent_path)
-                    rhythm_loss = compute_rhythm_loss(pred_r_prob, batch["future_r_peaks"])
+                    pred_r_logits = unwrapped.predict_r_peak_logits(prior_latent_path)
+                    rhythm_loss = compute_rhythm_loss(pred_r_logits, batch["future_r_peaks"])
+
                     w_rhythm = getattr(self.config.loss, "lambda_rhythm", 0.5)
                     prior_waveform_loss = prior_waveform_loss + w_rhythm * rhythm_loss
 
@@ -460,7 +458,8 @@ class Trainer:
                 mean_latent, _ = unwrapped.sde.integrate(z0=prior_mean, ts=ts, context_summary=c_summary, mode="prior")
                 unwrapped.sde.sde_func.raw_sigma.data.copy_(raw_sigma_orig)
 
-                mean_wf, mean_scale = unwrapped.decoder(mean_latent, c_summary)
+                mean_wf, mean_scale = unwrapped.decoder(mean_latent, c_summary, target_len=f_wf.size(1))
+
                 mean_nll = compute_laplace_nll(mean_wf, f_wf, mean_scale)
                 mean_morph, _ = compute_morphology_loss(mean_wf, f_wf)
                 prior_mean_anchor_loss = mean_nll + mean_morph
