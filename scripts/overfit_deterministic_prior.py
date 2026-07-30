@@ -19,16 +19,26 @@ from ecg_forecast.debug.metrics import (
 from ecg_forecast.debug.reporting import save_debug_artifacts
 
 
+def select_distributed_tiny_windows(dataset, target_count: int = 32):
+    """Selects 32 windows distributed across multiple records rather than 32 contiguous windows from record 0."""
+    total_len = len(dataset)
+    if total_len <= target_count:
+        return list(range(total_len))
+
+    # Stratified step sampling across dataset records
+    indices = np.linspace(0, total_len - 1, target_count, dtype=int).tolist()
+    return indices
+
+
 def main():
     parser = argparse.ArgumentParser(description="Overfit deterministic prior on tiny 32-window dataset (Gate 2).")
-    parser.add_argument("--checkpoint", type=str, default=None, help="Optional Stage A checkpoint path (Version A)")
+    parser.add_argument("--checkpoint", type=str, default=None, help="Optional Stage A checkpoint path (Gate 2B)")
     parser.add_argument("--data_dir", type=str, default="data/incart")
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--horizon_sec", type=float, default=0.5)
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--output_dir", type=str, default="artifacts/debug/overfit_deterministic_prior/incart")
     args = parser.parse_args()
-
 
     if not os.path.exists(args.data_dir):
         raise FileNotFoundError(f"Dataset directory '{args.data_dir}' does not exist. Cannot run deterministic prior overfit.")
@@ -37,19 +47,22 @@ def main():
     cfg.data.data_dir = args.data_dir
     cfg.data.future_seconds = args.horizon_sec
 
-    print(f"[Overfit Deterministic Prior] Loading data from {args.data_dir} for 32-window overfit test...")
+    print(f"[Overfit Deterministic Prior] Loading data from {args.data_dir} for 32-window distributed overfit test...")
     train_loader, _, _, _ = get_incart_dataloaders(config=cfg.data, batch_size=args.batch_size, num_workers=0)
 
     from ecg_forecast.data.collate import ecg_collate_fn
+    from ecg_forecast.utils.timegrid import make_latent_times
 
-    # Extract exactly 32 samples
-    tiny_dataset = Subset(train_loader.dataset, range(min(32, len(train_loader.dataset))))
+    # Distributed 32-window selection across multiple records
+    dist_indices = select_distributed_tiny_windows(train_loader.dataset, target_count=32)
+    tiny_dataset = Subset(train_loader.dataset, dist_indices)
     tiny_loader = DataLoader(tiny_dataset, batch_size=args.batch_size, shuffle=False, collate_fn=ecg_collate_fn)
 
-
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    if args.checkpoint is not None and os.path.exists(args.checkpoint):
-        print(f"[Overfit Deterministic Prior] Loading Stage A checkpoint from {args.checkpoint} (Version A)...")
+    is_gate_2b = args.checkpoint is not None and os.path.exists(args.checkpoint)
+
+    if is_gate_2b:
+        print(f"[Overfit Deterministic Prior] Gate 2B: Loading Stage A checkpoint from {args.checkpoint} (Frozen representation)...")
         from ecg_forecast.debug.checkpoint_loader import load_forecaster_checkpoint
         model, cfg = load_forecaster_checkpoint(args.checkpoint, device=device)
         for p in model.parameters():
@@ -58,8 +71,9 @@ def main():
             p.requires_grad = True
         for p in model.sde.sde_func.prior_drift_net.parameters():
             p.requires_grad = True
+        gate_mode = "Gate_2B_Frozen_Stage_A"
     else:
-        print("[Overfit Deterministic Prior] Training from scratch (Version B: unfreezing context encoder, prior drift, and decoder)...")
+        print("[Overfit Deterministic Prior] Gate 2A: Full-system memorization (Training context encoder, prior drift, and decoder)...")
         model = LatentSDEForecaster(config=cfg.model).to(device)
         for p in model.parameters():
             p.requires_grad = False
@@ -69,17 +83,16 @@ def main():
             p.requires_grad = True
         for p in model.decoder.parameters():
             p.requires_grad = True
+        gate_mode = "Gate_2A_Full_System"
 
     trainable_params = [p for p in model.parameters() if p.requires_grad]
     optimizer = torch.optim.AdamW(trainable_params, lr=1e-3, weight_decay=1e-4)
 
-
     t_samples = int(round(args.horizon_sec * 100))
-    t_latent = int(round(args.horizon_sec * 25))
-    ts = torch.linspace(0.04, args.horizon_sec, t_latent, device=device)
+    ts = make_latent_times(future_samples=t_samples, sampling_rate=100, latent_rate=25, device=device)
 
     history = []
-    print(f"[Overfit Deterministic Prior] Training for {args.epochs} epochs on {len(tiny_dataset)} windows...")
+    print(f"[Overfit Deterministic Prior] [{gate_mode}] Training for {args.epochs} epochs on {len(tiny_dataset)} distributed windows...")
 
     for epoch in range(args.epochs):
         model.train()
@@ -97,13 +110,12 @@ def main():
             c_summary, _, prior_mean, _ = model.context_encoder(c_wf)
             z0_p = prior_mean
 
-            # Force zero diffusion
+            # Exact deterministic SDE mode (deterministic=True)
             with torch.amp.autocast("cuda", enabled=False):
                 latent_path, _ = model.sde.integrate(
-                    z0=z0_p, ts=ts, context_summary=c_summary, mode="prior", brownian_motion=None
+                    z0=z0_p, ts=ts, context_summary=c_summary, mode="prior", deterministic=True
                 )
                 wf_pred, _ = model.decoder(latent_path, c_summary, target_len=f_wf.size(1))
-
 
                 loss_l1 = torch.abs(wf_pred - f_wf).mean()
                 loss_morph, _ = compute_morphology_loss(wf_pred, f_wf)
@@ -151,7 +163,8 @@ def main():
     )
 
     summary_data = {
-        "dataset": "32_window_subset",
+        "gate_mode": gate_mode,
+        "dataset": "32_distributed_windows",
         "horizon_sec": args.horizon_sec,
         "final_metrics": final_m,
         "history": history,
@@ -164,7 +177,7 @@ def main():
         config=cfg,
     )
 
-    print(f"[Overfit Deterministic Prior] Complete. Gate 2 Passed: {gate_2_passed}. Results saved to {args.output_dir}")
+    print(f"[Overfit Deterministic Prior] [{gate_mode}] Complete. Gate 2 Passed: {gate_2_passed}. Results saved to {args.output_dir}")
 
 
 if __name__ == "__main__":

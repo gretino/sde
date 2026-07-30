@@ -67,17 +67,17 @@ class LatentSDEForecaster(nn.Module):
             nn.Conv1d(32, 1, kernel_size=5, padding=2),
         )
 
-    def predict_r_peak_logits(self, latent_path: torch.Tensor) -> torch.Tensor:
+    def predict_r_peak_logits(self, latent_path: torch.Tensor, target_len: Optional[int] = None) -> torch.Tensor:
         """Predicts future R-peak logits [B, T_waveform] from latent trajectory."""
         x_t = latent_path.transpose(1, 2)  # [B, latent_dim, T_latent]
-        t_target = latent_path.size(1) * 4
+        t_target = target_len if target_len is not None else latent_path.size(1) * 4
         x_up = nn.functional.interpolate(x_t, size=t_target, mode="linear", align_corners=False)
         logits = self.rhythm_head(x_up).squeeze(1)  # [B, T_waveform]
         return logits
 
-    def predict_r_peak_probability(self, latent_path: torch.Tensor) -> torch.Tensor:
+    def predict_r_peak_probability(self, latent_path: torch.Tensor, target_len: Optional[int] = None) -> torch.Tensor:
         """Predicts future R-peak probability map [B, T_waveform] from latent trajectory."""
-        return torch.sigmoid(self.predict_r_peak_logits(latent_path))
+        return torch.sigmoid(self.predict_r_peak_logits(latent_path, target_len=target_len))
 
 
 

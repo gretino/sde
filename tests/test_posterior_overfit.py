@@ -20,10 +20,12 @@ def test_posterior_overfit_acceptance_criteria():
     c_wf = torch.sin(2 * 3.14159 * 1.2 * t_ctx).unsqueeze(0).repeat(b, 1, 1)
     f_wf = torch.sin(2 * 3.14159 * 1.2 * t_fut).unsqueeze(0).repeat(b, 1, 1)
 
-    for step in range(150):
+    from ecg_forecast.losses.morphology import compute_morphology_loss
+
+    for step in range(250):
         optimizer.zero_grad()
         out = model.forward_posterior(c_wf, f_wf)
-        loss, _ = compute_elbo_loss(
+        elbo_loss, _ = compute_elbo_loss(
             pred_mean=out.waveform_mean,
             target=f_wf,
             scale=out.waveform_scale,
@@ -32,8 +34,11 @@ def test_posterior_overfit_acceptance_criteria():
             beta_initial=0.0,
             beta_path=0.0,
         )
+        morph_loss, _ = compute_morphology_loss(out.waveform_mean, f_wf)
+        loss = elbo_loss + morph_loss
         loss.backward()
         optimizer.step()
+
 
     # Verify Section 10.4 acceptance criteria
     final_out = model.forward_posterior(c_wf, f_wf)

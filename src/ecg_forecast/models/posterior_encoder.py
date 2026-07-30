@@ -40,18 +40,24 @@ class PosteriorEncoder(nn.Module):
         self,
         full_waveform: torch.Tensor,
         context_summary: torch.Tensor,
+        future_samples: int = 200,
+        sampling_rate: int = 100,
+        latent_rate: int = 25,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Args:
-            full_waveform: Concatenated [context, future] waveform [B, 700, num_leads]
+            full_waveform: Concatenated [context, future] waveform [B, T_full, num_leads]
             context_summary: Prior context summary [B, context_dim]
+            future_samples: Number of future waveform samples
+            sampling_rate: Sampling rate in Hz (default 100)
+            latent_rate: Latent sampling rate in Hz (default 25)
         Returns:
             posterior_summary: [B, context_dim]
-            recognition_path: [B, 50, context_dim] (future 2.0s interval @ 25 Hz)
+            recognition_path: [B, future_latent_steps, context_dim]
             posterior_mean: [B, latent_dim]
             posterior_logvar: [B, latent_dim]
         """
-        # [B, 700, num_leads] -> [B, num_leads, 700]
+        # [B, T_full, num_leads] -> [B, num_leads, T_full]
         x = full_waveform.transpose(1, 2)
 
         x = F.gelu(self.conv1(x))
@@ -60,11 +66,15 @@ class PosteriorEncoder(nn.Module):
         x = self.res2(x)
         x = self.res3(x)
 
-        # Transpose back: [B, context_dim, 175] -> [B, 175, context_dim]
+        # Transpose back: [B, context_dim, T_tokens] -> [B, T_tokens, context_dim]
         full_tokens = x.transpose(1, 2)
 
-        # The last 50 tokens (out of 175) correspond to the 2.0s future interval (200 samples / 4 = 50 tokens)
-        recognition_path = full_tokens[:, -50:, :]
+        # Dynamic slicing based on future_samples / (sampling_rate / latent_rate)
+        future_seconds = float(future_samples) / float(sampling_rate)
+        future_latent_steps = int(round(future_seconds * float(latent_rate)))
+        future_latent_steps = min(max(1, future_latent_steps), full_tokens.size(1))
+
+        recognition_path = full_tokens[:, -future_latent_steps:, :]
 
         # Attention pooling over recognition path
         weights = F.softmax(self.attn_net(recognition_path), dim=1)

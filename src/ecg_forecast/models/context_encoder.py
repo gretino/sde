@@ -53,10 +53,50 @@ class ContextEncoder(nn.Module):
         self.fc_mean = nn.Linear(context_dim, latent_dim)
         self.fc_logvar = nn.Linear(context_dim, latent_dim)
 
+    def encode_features(self, context_waveform: torch.Tensor) -> Dict[str, torch.Tensor]:
+        """Extracts component context features for phase probing and dynamic conditioning.
+        Args:
+            context_waveform: [B, T_c, num_leads]
+        Returns:
+            dict containing 'tokens', 'global', 'boundary', 'recent', 'dynamic'
+        """
+        # [B, T_c, num_leads] -> [B, num_leads, T_c]
+        x = context_waveform.transpose(1, 2)
+
+        x = F.gelu(self.conv1(x))
+        x = self.res1(x)
+        x = F.gelu(self.conv2(x))
+        x = self.res2(x)
+        x = self.res3(x)
+
+        # Transpose back: [B, context_dim, T_tokens] -> [B, T_tokens, context_dim]
+        context_tokens = x.transpose(1, 2)
+
+        # Attention pooling
+        weights = F.softmax(self.attn_net(context_tokens), dim=1)  # [B, T_tokens, 1]
+        global_summary = (context_tokens * weights).sum(dim=1)     # [B, context_dim]
+
+        # Boundary token (at t=0) and recent summary (final 1.0s / 25 tokens)
+        boundary_token = context_tokens[:, -1, :]
+        num_recent = min(25, context_tokens.size(1))
+        recent_summary = context_tokens[:, -num_recent:, :].mean(dim=1)
+
+        concat_feats = torch.cat([global_summary, boundary_token, recent_summary], dim=-1)
+        dynamic_summary = F.gelu(self.dynamic_proj(concat_feats))
+
+        return {
+            "tokens": context_tokens,
+            "global": global_summary,
+            "boundary": boundary_token,
+            "recent": recent_summary,
+            "dynamic": dynamic_summary,
+        }
+
     def get_dynamic_context(self, context_tokens: torch.Tensor, global_summary: torch.Tensor) -> torch.Tensor:
         """Constructs boundary-aware dynamic context c_dynamic = [global_summary, boundary_token, recent_summary]."""
         boundary_token = context_tokens[:, -1, :]  # Final context token at t=0
-        recent_summary = context_tokens[:, -25:, :].mean(dim=1)  # Mean over final 1 second (25 tokens)
+        num_recent = min(25, context_tokens.size(1))
+        recent_summary = context_tokens[:, -num_recent:, :].mean(dim=1)  # Mean over final 1 second
         concat_feats = torch.cat([global_summary, boundary_token, recent_summary], dim=-1)
         return F.gelu(self.dynamic_proj(concat_feats))
 
@@ -70,24 +110,9 @@ class ContextEncoder(nn.Module):
             prior_mean: [B, latent_dim]
             prior_logvar: [B, latent_dim]
         """
-        # [B, 500, num_leads] -> [B, num_leads, 500]
-        x = context_waveform.transpose(1, 2)
-
-        x = F.gelu(self.conv1(x))
-        x = self.res1(x)
-        x = F.gelu(self.conv2(x))
-        x = self.res2(x)
-        x = self.res3(x)
-
-        # Transpose back: [B, context_dim, 125] -> [B, 125, context_dim]
-        context_tokens = x.transpose(1, 2)
-
-        # Attention pooling
-        weights = F.softmax(self.attn_net(context_tokens), dim=1)  # [B, 125, 1]
-        global_summary = (context_tokens * weights).sum(dim=1)     # [B, context_dim]
-
-        # Boundary-aware dynamic context summary
-        context_summary = self.get_dynamic_context(context_tokens, global_summary)
+        feats = self.encode_features(context_waveform)
+        context_summary = feats["dynamic"]
+        context_tokens = feats["tokens"]
 
         # Prior initial state parameterization
         prior_mean = self.fc_mean(context_summary)

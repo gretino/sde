@@ -195,10 +195,13 @@ class TrainingConfig:
         self.mixed_precision = mixed_precision
         self.prior_samples_eval = prior_samples_eval
         self.use_wandb = use_wandb
-        self.wandb_project = wandb_project
-        self.run_name = run_name if run_name is not None else wandb_run_name
         self.seed = seed
         self.checkpoint_dir = checkpoint_dir
+
+    @property
+    def max_grad_norm(self) -> float:
+        return self.clip_grad
+
 
     @property
     def lr(self) -> float:

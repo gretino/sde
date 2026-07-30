@@ -2,6 +2,7 @@ from typing import Dict, Any, Optional
 import torch
 import torch.nn as nn
 from ..models.latent_sde_forecaster import LatentSDEForecaster
+from ..utils.timegrid import make_latent_times
 
 
 def run_decomposed_rollouts(
@@ -20,27 +21,25 @@ def run_decomposed_rollouts(
     model.eval()
     device = context_waveform.device
     b = context_waveform.size(0)
+    future_samples = future_waveform.size(1)
 
     # 1. Prior Context Encoding -> mu_p, c_summary
     c_summary, c_tokens, prior_mean, prior_logvar = model.context_encoder(context_waveform)
 
     # 2. Posterior Encoding -> mu_q, rec_path
     full_wf = torch.cat([context_waveform, future_waveform], dim=1)
-    post_summary, rec_path, post_mean, post_logvar = model.posterior_encoder(full_wf, c_summary)
+    post_summary, rec_path, post_mean, post_logvar = model.posterior_encoder(
+        full_wf, c_summary, future_samples=future_samples, sampling_rate=100, latent_rate=25
+    )
 
-    # Timestamps [50] (0.04, 0.08, ..., 2.00)
-    if future_times is not None and future_times.dim() == 1:
-        ts = future_times[::4]
-    elif future_times is not None and future_times.dim() == 2:
-        ts = future_times[0, ::4]
-    else:
-        ts = torch.linspace(0.04, 2.0, 50, device=device)
+    # Centralized timestamps
+    ts = make_latent_times(future_samples=future_samples, sampling_rate=100, latent_rate=25, device=device)
 
     # Deterministic z0s (mean only, zero diffusion)
     z0_p = prior_mean
     z0_q = post_mean
 
-    t_target = future_waveform.size(1)
+    t_target = future_samples
     results = {}
 
     with torch.no_grad():
@@ -52,6 +51,7 @@ def run_decomposed_rollouts(
             recognition_path=rec_path,
             mode="posterior",
             brownian_motion=None,
+            deterministic=True,
         )
         wf_A, _ = model.decoder(latent_A, c_summary, target_len=t_target)
         results["A"] = {"waveform_mean": wf_A, "latent_path": latent_A}
@@ -63,6 +63,7 @@ def run_decomposed_rollouts(
             context_summary=c_summary,
             mode="prior",
             brownian_motion=None,
+            deterministic=True,
         )
         wf_B, _ = model.decoder(latent_B, c_summary, target_len=t_target)
         results["B"] = {"waveform_mean": wf_B, "latent_path": latent_B}
@@ -74,6 +75,7 @@ def run_decomposed_rollouts(
             context_summary=c_summary,
             mode="prior",
             brownian_motion=None,
+            deterministic=True,
         )
         wf_C, _ = model.decoder(latent_C, c_summary, target_len=t_target)
         results["C"] = {"waveform_mean": wf_C, "latent_path": latent_C}
@@ -86,6 +88,7 @@ def run_decomposed_rollouts(
             recognition_path=rec_path,
             mode="posterior",
             brownian_motion=None,
+            deterministic=True,
         )
         wf_D, _ = model.decoder(latent_D, c_summary, target_len=t_target)
         results["D"] = {"waveform_mean": wf_D, "latent_path": latent_D}
@@ -93,6 +96,5 @@ def run_decomposed_rollouts(
         # --- Rollout E: Direct teacher latent decoding ---
         wf_E, _ = model.decoder(latent_A, c_summary, target_len=t_target)
         results["E"] = {"waveform_mean": wf_E, "latent_path": latent_A}
-
 
     return results

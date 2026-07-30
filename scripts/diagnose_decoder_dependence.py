@@ -51,52 +51,38 @@ def main():
     ]
 
     ablation_metrics = {k: [] for k in ablations}
-    latent_grads = []
-    context_grads = []
 
-    print("[Diagnose Decoder] Running decoder input ablations and gradient sensitivity...")
+    from ecg_forecast.utils.timegrid import make_latent_times
 
-    for batch_cnt, batch in enumerate(val_loader):
-        if batch_cnt >= args.num_batches:
-            break
+    print("[Diagnose Decoder] Running deterministic decoder ablations...")
 
-        c_wf = batch["context_waveform"].to(device)
-        f_wf = batch["future_waveform"].to(device)
-        b = c_wf.size(0)
+    with torch.no_grad():
+        for batch_cnt, batch in enumerate(val_loader):
+            if batch_cnt >= args.num_batches:
+                break
 
-        # 1. Obtain posterior and prior latents and context summary
-        c_summary, _, prior_mean, _ = model.context_encoder(c_wf)
-        full_wf = torch.cat([c_wf, f_wf], dim=1)
-        _, rec_path, post_mean, _ = model.posterior_encoder(full_wf, c_summary)
+            c_wf = batch["context_waveform"].to(device)
+            f_wf = batch["future_waveform"].to(device)
+            b = c_wf.size(0)
+            target_samples = f_wf.size(1)
 
-        horizon_sec = f_wf.size(1) / 100.0
-        t_latent = int(round(horizon_sec * 25))
-        ts = torch.linspace(0.04, horizon_sec, t_latent, device=device)
-        with torch.no_grad():
+            c_summary, _, prior_mean, _ = model.context_encoder(c_wf)
+            full_wf = torch.cat([c_wf, f_wf], dim=1)
+            _, rec_path, post_mean, _ = model.posterior_encoder(
+                full_wf, c_summary, future_samples=target_samples, sampling_rate=100, latent_rate=25
+            )
+
+            ts = make_latent_times(future_samples=target_samples, sampling_rate=100, latent_rate=25, device=device)
+            
             post_latent, _ = model.sde.integrate(
-                z0=post_mean, ts=ts, context_summary=c_summary, recognition_path=rec_path, mode="posterior"
+                z0=post_mean, ts=ts, context_summary=c_summary, recognition_path=rec_path, mode="posterior", deterministic=True
             )
             prior_latent, _ = model.sde.integrate(
-                z0=prior_mean, ts=ts, context_summary=c_summary, mode="prior"
+                z0=prior_mean, ts=ts, context_summary=c_summary, mode="prior", deterministic=True
             )
 
-        # Gradient sensitivity calculation
-        lat_req = post_latent.detach().clone().requires_grad_(True)
-        ctx_req = c_summary.detach().clone().requires_grad_(True)
+            t_target = target_samples
 
-        wf_pred, _ = model.decoder(lat_req, ctx_req, target_len=f_wf.size(1))
-
-        loss_dummy = wf_pred.sum()
-        loss_dummy.backward()
-
-        l_grad_norm = float(lat_req.grad.abs().mean().item())
-        c_grad_norm = float(ctx_req.grad.abs().mean().item())
-        latent_grads.append(l_grad_norm)
-        context_grads.append(c_grad_norm)
-
-        # 2. Evaluate Ablations
-        with torch.no_grad():
-            t_target = f_wf.size(1)
             # A1: posterior_latent + correct_context
             wf1, _ = model.decoder(post_latent, c_summary, target_len=t_target)
 
@@ -120,7 +106,6 @@ def main():
             # A7: prior_latent + correct_context
             wf7, _ = model.decoder(prior_latent, c_summary, target_len=t_target)
 
-
             abl_preds = [wf1, wf2, wf3, wf4, wf5, wf6, wf7]
             for idx, abl_name in enumerate(ablations):
                 w_m = compute_waveform_debug_metrics(abl_preds[idx], f_wf)
@@ -134,10 +119,6 @@ def main():
                     "waveform_amplitude_range": w_m["waveform_amplitude_range"],
                 })
 
-    mean_latent_grad = float(np.mean(latent_grads))
-    mean_context_grad = float(np.mean(context_grads))
-    grad_ratio = mean_latent_grad / (mean_context_grad + 1e-8)
-
     summary_ablations = {}
     for abl_name in ablations:
         dicts = ablation_metrics[abl_name]
@@ -145,33 +126,69 @@ def main():
             k: float(np.mean([d[k] for d in dicts])) for k in dicts[0].keys()
         }
 
-    # Interpretation
-    baseline_mse = summary_ablations["posterior_latent_plus_correct_context"]["mse"]
-    zero_lat_mse = summary_ablations["zero_latent_plus_correct_context"]["mse"]
-    time_shuf_mse = summary_ablations["time_shuffled_latent_plus_correct_context"]["mse"]
-    batch_shuf_mse = summary_ablations["batch_shuffled_latent_plus_correct_context"]["mse"]
+    # Latent-Dimension Perturbation Sensitivity Test (Section 7.2)
+    print("[Diagnose Decoder] Running per-latent-dimension perturbation test...")
+    latent_dim = post_latent.size(-1)
+    emp_std_per_dim = post_latent.std(dim=(0, 1)).cpu().numpy()
+    sensitivity_rows = []
 
-    interpretation = []
-    if zero_lat_mse <= baseline_mse * 1.1:
-        interpretation.append("CRITICAL: decoder context shortcut detected (zero latent performs as well as true latent)")
-    if time_shuf_mse <= baseline_mse * 1.1:
-        interpretation.append("decoder ignores temporal ordering of latent trajectory")
-    if batch_shuf_mse <= baseline_mse * 1.1:
-        interpretation.append("decoder ignores latent identity (uses only context summary)")
-    if grad_ratio < 0.05:
-        interpretation.append("CRITICAL: latent gradient sensitivity is near zero")
+    with torch.no_grad():
+        for d in range(latent_dim):
+            eps = 0.1 * max(float(emp_std_per_dim[d]), 1e-3)
+            z_plus = post_latent.clone()
+            z_plus[..., d] += eps
 
-    gate_4_passed = bool(
-        zero_lat_mse > baseline_mse * 1.5 and
-        time_shuf_mse > baseline_mse * 1.3 and
-        grad_ratio >= 0.10
-    )
+            wf_pert, _ = model.decoder(z_plus, c_summary, target_len=t_target)
+            mean_abs_change = float((wf_pert - wf1).abs().mean().item())
+            r_pert = compute_rhythm_debug_metrics(wf_pert, f_wf)
+            r_base = compute_rhythm_debug_metrics(wf1, f_wf)
+            timing_change_ms = float(abs(r_pert["next_rpeak_timing_mae_ms"] - r_base["next_rpeak_timing_mae_ms"]))
+
+            sensitivity_rows.append({
+                "latent_dimension": d,
+                "empirical_std": float(emp_std_per_dim[d]),
+                "perturbation_epsilon": eps,
+                "mean_absolute_waveform_change": mean_abs_change,
+                "next_rpeak_timing_change_ms": timing_change_ms,
+            })
+
+    # Save sensitivity CSV
+    os.makedirs(args.output_dir, exist_ok=True)
+    import pandas as pd
+    pd.DataFrame(sensitivity_rows).to_csv(os.path.join(args.output_dir, "latent_dimension_sensitivity.csv"), index=False)
+
+    # Gate 4 Interpretation Rules (Section 7.3)
+    base_pearson = summary_ablations["posterior_latent_plus_correct_context"]["macro_pearson"]
+    zero_pearson = summary_ablations["zero_latent_plus_correct_context"]["macro_pearson"]
+    time_shuf_pearson = summary_ablations["time_shuffled_latent_plus_correct_context"]["macro_pearson"]
+    batch_shuf_pearson = summary_ablations["batch_shuffled_latent_plus_correct_context"]["macro_pearson"]
+
+    zero_drop = base_pearson - zero_pearson
+    time_shuf_drop = base_pearson - time_shuf_pearson
+    batch_shuf_drop = base_pearson - batch_shuf_pearson
+
+    if zero_drop >= 0.20 and time_shuf_drop >= 0.15 and batch_shuf_drop >= 0.15:
+        classification = "latent used strongly"
+    elif zero_drop >= 0.10 or time_shuf_drop >= 0.08:
+        classification = "latent used partially"
+    else:
+        classification = "latent mostly ignored"
+
+    interpretation = [
+        f"Classification: {classification}",
+        f"Zero latent Pearson drop: {zero_drop:.4f}",
+        f"Time shuffle Pearson drop: {time_shuf_drop:.4f}",
+        f"Batch shuffle Pearson drop: {batch_shuf_drop:.4f}",
+    ]
+
+    gate_4_passed = bool(classification in ["latent used strongly", "latent used partially"])
 
     summary_data = {
         "checkpoint": args.checkpoint,
-        "mean_latent_grad_sensitivity": mean_latent_grad,
-        "mean_context_grad_sensitivity": mean_context_grad,
-        "gradient_ratio_latent_to_context": grad_ratio,
+        "classification": classification,
+        "zero_latent_pearson_drop": zero_drop,
+        "time_shuffle_pearson_drop": time_shuf_drop,
+        "batch_shuffle_pearson_drop": batch_shuf_drop,
         "ablations": summary_ablations,
         "interpretation": interpretation,
         "gate_4_passed": gate_4_passed,
@@ -183,7 +200,7 @@ def main():
         config=cfg,
     )
 
-    print(f"[Diagnose Decoder] Complete. Gate 4 Passed: {gate_4_passed}. Summary saved to {args.output_dir}/summary.json")
+    print(f"[Diagnose Decoder] Complete. Gate 4 Passed: {gate_4_passed} ({classification}). Artifacts saved to {args.output_dir}")
     print("Diagnosis Interpretation:", interpretation)
 
 

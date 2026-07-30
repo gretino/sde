@@ -31,17 +31,22 @@ class Trainer:
         self,
         config: Config,
         model: LatentSDEForecaster,
-        train_loader: DataLoader,
-        val_loader: DataLoader,
+        train_loader: Optional[DataLoader] = None,
+        val_loader: Optional[DataLoader] = None,
         device: Optional[str] = None,
         use_wandb: bool = False,
         record_splits: Optional[Dict[str, Any]] = None,
     ):
+
+        if isinstance(config, LatentSDEForecaster) and isinstance(model, Config):
+            config, model = model, config
+
         self.config = config
         self.raw_model = model
         self.train_loader = train_loader
         self.val_loader = val_loader
         self.record_splits = record_splits
+
 
         # Multi-GPU setup
         num_gpus = torch.cuda.device_count()
@@ -94,7 +99,7 @@ class Trainer:
         unwrapped.decoder.raw_obs_log_scale.requires_grad = False
 
     def set_stage_b_trainable_modules(self):
-        """Stage B: Freeze posterior teacher & decoder; train prior heads & prior drift (Sections 8.3 & 8.4)."""
+        """Stage B: Freeze posterior teacher & decoder; train ONLY prior mean head & prior drift (Package C 10.3)."""
         unwrapped = self.get_unwrapped_model()
         unwrapped.set_stage("B")
 
@@ -102,17 +107,76 @@ class Trainer:
         for p in unwrapped.parameters():
             p.requires_grad = False
 
-        # Unfreeze prior initial-state heads and context attention pool
-        for p in unwrapped.context_encoder.attn_net.parameters():
-            p.requires_grad = True
+        # Train ONLY fc_mean and prior_drift_net
         for p in unwrapped.context_encoder.fc_mean.parameters():
             p.requires_grad = True
-        for p in unwrapped.context_encoder.fc_logvar.parameters():
-            p.requires_grad = True
 
-        # Unfreeze prior drift
         for p in unwrapped.sde.sde_func.prior_drift_net.parameters():
             p.requires_grad = True
+
+        # Log trainable parameter names
+        os.makedirs("artifacts/training", exist_ok=True)
+        param_file = os.path.join("artifacts/training", "stage_b_trainable_parameters.txt")
+        trainable_names = [n for n, p in unwrapped.named_parameters() if p.requires_grad]
+        with open(param_file, "w") as f:
+            f.write("\n".join(trainable_names) + "\n")
+
+    def _setup_stage_b_freezing(self):
+        self.set_stage_b_trainable_modules()
+
+    def _load_best_stage_a_checkpoint(self) -> bool:
+        ckpt_dir = self.config.training.checkpoint_dir
+        best_path = os.path.join(ckpt_dir, "posterior_warmup_best.pt")
+        if os.path.exists(best_path):
+            unwrapped = self.get_unwrapped_model()
+            checkpoint = torch.load(best_path, map_location=self.device)
+            unwrapped.load_state_dict(checkpoint["model_state_dict"])
+            return True
+        return False
+
+    def _train_stage_a_step(self, batch: Dict[str, torch.Tensor], optimizer: torch.optim.Optimizer) -> Dict[str, float]:
+        unwrapped = self.get_unwrapped_model()
+        unwrapped.train()
+        c_wf = batch["context_waveform"].to(self.device)
+        f_wf = batch["future_waveform"].to(self.device)
+        r_targets = batch.get("rpeak_targets", None)
+        if r_targets is not None:
+            r_targets = r_targets.to(self.device)
+
+        optimizer.zero_grad()
+        out = unwrapped.forward_posterior(c_wf, f_wf)
+
+        elbo_loss, elbo_dict = compute_elbo_loss(
+            pred_mean=out.waveform_mean,
+            target=f_wf,
+            scale=out.waveform_scale,
+            initial_kl=out.initial_kl,
+            path_kl=out.path_kl,
+            beta_initial=1.0,
+            beta_path=1.0,
+        )
+
+        morph_loss, _ = compute_morphology_loss(out.waveform_mean, f_wf)
+
+        rhythm_loss = torch.tensor(0.0, device=self.device)
+        if r_targets is not None:
+            logits = unwrapped.predict_r_peak_logits(out.latent_path, target_len=f_wf.size(1))
+            rhythm_loss = torch.nn.functional.binary_cross_entropy_with_logits(logits, r_targets)
+
+
+        total_loss = elbo_loss + morph_loss + 0.5 * rhythm_loss
+        total_loss.backward()
+        clip_val = getattr(self.config.training, "max_grad_norm", getattr(self.config.training, "clip_grad", 1.0))
+        torch.nn.utils.clip_grad_norm_(unwrapped.parameters(), clip_val)
+        optimizer.step()
+
+
+        return {
+            "loss": float(total_loss.item()),
+            "rhythm": float(rhythm_loss.item()),
+            "morphology": float(morph_loss.item()),
+        }
+
 
     def set_stage_c_trainable_modules(self):
         """Stage C: Joint fine-tuning with all modules unfrozen and stage-specific parameter groups."""
@@ -138,18 +202,16 @@ class Trainer:
         unwrapped = self.get_unwrapped_model()
         self.set_stage_b_trainable_modules()
         
-        prior_params = list(unwrapped.context_encoder.fc_mean.parameters()) + \
-                       list(unwrapped.context_encoder.fc_logvar.parameters()) + \
-                       list(unwrapped.sde.sde_func.prior_drift_net.parameters())
-        attn_params = list(unwrapped.context_encoder.attn_net.parameters())
+        prior_mean_params = list(unwrapped.context_encoder.fc_mean.parameters())
+        prior_drift_params = list(unwrapped.sde.sde_func.prior_drift_net.parameters())
 
         param_groups = [
-            {"params": [p for p in prior_params if p.requires_grad], "lr": self.config.training.stage_b_prior_learning_rate},
-            {"params": [p for p in attn_params if p.requires_grad], "lr": self.config.training.stage_b_context_learning_rate},
+            {"params": [p for p in prior_mean_params if p.requires_grad], "lr": 3e-4},
+            {"params": [p for p in prior_drift_params if p.requires_grad], "lr": 3e-4},
         ]
         optimizer = torch.optim.AdamW(
             param_groups,
-            weight_decay=self.config.training.weight_decay,
+            weight_decay=1e-4,
         )
         self.optimizer = optimizer
         return optimizer
@@ -191,6 +253,7 @@ class Trainer:
             "loss": [],
             "nll": [],
             "morphology_loss": [],
+            "rhythm_loss": [],
             "latent_temporal_std": [],
         }
 
@@ -221,6 +284,15 @@ class Trainer:
                 )
                 total_loss = nll + morph_loss
 
+                # Section 13: Train rhythm head in Stage A
+                rhythm_loss_val = 0.0
+                if "future_r_peaks" in batch and len(batch["future_r_peaks"]) > 0:
+                    from ..losses.morphology import compute_rhythm_loss
+                    pred_r_logits = unwrapped.predict_r_peak_logits(output.latent_path, target_len=f_wf.size(1))
+                    r_loss = compute_rhythm_loss(pred_r_logits, batch["future_r_peaks"])
+                    total_loss = total_loss + 0.5 * r_loss
+                    rhythm_loss_val = float(r_loss.item())
+
             if self.use_amp:
                 self.scaler.scale(total_loss).backward()
                 self.scaler.unscale_(self.optimizer)
@@ -238,6 +310,7 @@ class Trainer:
             epoch_metrics["loss"].append(float(total_loss.item()))
             epoch_metrics["nll"].append(float(nll.item()))
             epoch_metrics["morphology_loss"].append(morph_dict["morphology_loss"])
+            epoch_metrics["rhythm_loss"].append(rhythm_loss_val)
             epoch_metrics["latent_temporal_std"].append(float(latent_std.item()))
 
         res = {k: (float(np.mean(v)) if len(v) > 0 else 0.0) for k, v in epoch_metrics.items()}
@@ -248,7 +321,7 @@ class Trainer:
         res["observation_scale"] = float(unwrapped.decoder.observation_scale.mean().item())
         return res
 
-    def train_stage_b_epoch(self, epoch_in_stage: int, total_stage_epochs: int) -> Dict[str, float]:
+    def train_stage_b_epoch(self, epoch_in_stage: int, total_stage_epochs: int, horizon_sec: float = 0.5) -> Dict[str, float]:
         self.model.train()
         unwrapped = self.get_unwrapped_model()
         epoch_metrics = {
@@ -265,28 +338,34 @@ class Trainer:
         w_z0 = getattr(self.config.loss, "lambda_z0", 0.1)
         w_drift = getattr(self.config.loss, "lambda_drift", 0.01)
 
-        for batch in tqdm(self.train_loader, desc=f"Train Stage B Epoch {epoch_in_stage+1}", leave=False):
+        from ..utils.timegrid import make_latent_times
+
+        for batch in tqdm(self.train_loader, desc=f"Train Stage B ({horizon_sec}s) Epoch {epoch_in_stage+1}", leave=False):
             c_wf = batch["context_waveform"].to(self.device, non_blocking=True)
-            f_wf = batch["future_waveform"].to(self.device, non_blocking=True)
-            c_times = batch["context_times"].to(self.device, non_blocking=True)
-            f_times = batch["future_times"].to(self.device, non_blocking=True)
+            
+            # Dynamic horizon slicing
+            target_samples = int(round(horizon_sec * 100))
+            f_wf = batch["future_waveform"][:, :target_samples, :].to(self.device, non_blocking=True)
+
+            ts = make_latent_times(future_samples=target_samples, sampling_rate=100, latent_rate=25, device=self.device)
 
             self.optimizer.zero_grad(set_to_none=True)
 
-            # 1. Run Detached Posterior Teacher Pass in Deterministic Mode (mu_q, zero diffusion)
+            # 1. Run Detached Posterior Teacher Pass in Exact Deterministic Mode (deterministic=True)
             with torch.no_grad():
                 c_summary_t, _, _, _ = unwrapped.context_encoder(c_wf)
                 full_wf = torch.cat([c_wf, f_wf], dim=1)
-                post_summary, rec_path, post_mean_det, post_logvar_det = unwrapped.posterior_encoder(full_wf, c_summary_t)
-
-                ts = f_times[0, ::4] if f_times.dim() == 2 else f_times[::4]
-
-                # Force zero diffusion for deterministic teacher path
-                raw_sigma_orig = unwrapped.sde.sde_func.raw_sigma.data.clone()
-                unwrapped.sde.sde_func.raw_sigma.data.fill_(-100.0)
+                post_summary, rec_path, post_mean_det, post_logvar_det = unwrapped.posterior_encoder(
+                    full_wf, c_summary_t, future_samples=target_samples, sampling_rate=100, latent_rate=25
+                )
 
                 post_latent_path, _ = unwrapped.sde.integrate(
-                    z0=post_mean_det, ts=ts, context_summary=c_summary_t, recognition_path=rec_path, mode="posterior"
+                    z0=post_mean_det,
+                    ts=ts,
+                    context_summary=c_summary_t,
+                    recognition_path=rec_path,
+                    mode="posterior",
+                    deterministic=True,
                 )
 
                 num_steps = ts.size(0)
@@ -297,21 +376,19 @@ class Trainer:
                     post_drifts.append(unwrapped.sde.sde_func.f(tk, zk))
                 post_drifts_det = torch.stack(post_drifts, dim=1).detach()
 
-                unwrapped.sde.sde_func.raw_sigma.data.copy_(raw_sigma_orig)
-
-            # 2. Run Deterministic Prior Student Pass (z0 = mu_p, zero diffusion)
+            # 2. Run Deterministic Prior Student Pass (z0 = mu_p, deterministic=True)
             with torch.amp.autocast("cuda", enabled=self.use_amp):
                 c_summary, c_tokens, prior_mean, prior_logvar = unwrapped.context_encoder(c_wf)
 
-                # Deterministic integration
-                unwrapped.sde.sde_func.raw_sigma.data.fill_(-100.0)
                 prior_latent_path, _ = unwrapped.sde.integrate(
-                    z0=prior_mean, ts=ts, context_summary=c_summary, mode="prior"
+                    z0=prior_mean,
+                    ts=ts,
+                    context_summary=c_summary,
+                    mode="prior",
+                    deterministic=True,
                 )
-                unwrapped.sde.sde_func.raw_sigma.data.copy_(raw_sigma_orig)
 
                 prior_wf_mean, prior_scale = unwrapped.decoder(prior_latent_path, c_summary, target_len=f_wf.size(1))
-
 
                 # Prior drift on detached teacher states
                 prior_drifts_on_teacher = []
@@ -331,12 +408,11 @@ class Trainer:
                 )
                 prior_waveform_loss = prior_nll + prior_morph
 
-                # Optional R-peak timing rhythm supervision (Section 10)
-                if "future_r_peaks" in batch and len(batch["future_r_peaks"]) > 0:
+                # Rhythm supervision only if rhythm head was validated in Stage A (Section 13)
+                if getattr(self, "stage_a_rhythm_validated", False) and "future_r_peaks" in batch and len(batch["future_r_peaks"]) > 0:
                     from ..losses.morphology import compute_rhythm_loss
-                    pred_r_logits = unwrapped.predict_r_peak_logits(prior_latent_path)
+                    pred_r_logits = unwrapped.predict_r_peak_logits(prior_latent_path, target_len=f_wf.size(1))
                     rhythm_loss = compute_rhythm_loss(pred_r_logits, batch["future_r_peaks"])
-
                     w_rhythm = getattr(self.config.loss, "lambda_rhythm", 0.5)
                     prior_waveform_loss = prior_waveform_loss + w_rhythm * rhythm_loss
 
@@ -344,7 +420,6 @@ class Trainer:
                 traj_loss = compute_autonomous_trajectory_loss(prior_latent_path, post_latent_path)
                 z0_loss = compute_initial_mean_loss(prior_mean, post_mean_det)
                 drift_teacher_loss = compute_drift_teacher_loss(prior_drifts_det, post_drifts_det)
-
 
                 total_loss = prior_waveform_loss + w_traj * traj_loss + w_z0 * z0_loss + w_drift * drift_teacher_loss
 
@@ -404,6 +479,8 @@ class Trainer:
             "weighted_kl_ratio": [],
         }
 
+        from ..utils.timegrid import make_latent_times
+
         for batch in tqdm(self.train_loader, desc=f"Train Stage C Epoch {epoch_in_stage+1}", leave=False):
             c_wf = batch["context_waveform"].to(self.device, non_blocking=True)
             f_wf = batch["future_waveform"].to(self.device, non_blocking=True)
@@ -438,6 +515,7 @@ class Trainer:
                     context_times=c_times,
                     future_times=f_times,
                     mode="prior",
+                    num_samples=1,
                 )
                 prior_out = ForecastOutput.from_dict(prior_dict)
                 prior_nll = compute_laplace_nll(prior_out.waveform_mean, f_wf, prior_out.waveform_scale)
@@ -449,15 +527,11 @@ class Trainer:
                 )
                 prior_wf_loss = prior_nll + prior_morph
 
-                # Prior deterministic mean anchor pass (Section 13)
+                # Prior deterministic mean anchor pass
                 c_summary, _, prior_mean, _ = unwrapped.context_encoder(c_wf)
-                ts = f_times[0, ::4] if f_times.dim() == 2 else f_times[::4]
+                ts = make_latent_times(future_samples=f_wf.size(1), device=self.device)
 
-                raw_sigma_orig = unwrapped.sde.sde_func.raw_sigma.data.clone()
-                unwrapped.sde.sde_func.raw_sigma.data.fill_(-100.0)
-                mean_latent, _ = unwrapped.sde.integrate(z0=prior_mean, ts=ts, context_summary=c_summary, mode="prior")
-                unwrapped.sde.sde_func.raw_sigma.data.copy_(raw_sigma_orig)
-
+                mean_latent, _ = unwrapped.sde.integrate(z0=prior_mean, ts=ts, context_summary=c_summary, mode="prior", deterministic=True)
                 mean_wf, mean_scale = unwrapped.decoder(mean_latent, c_summary, target_len=f_wf.size(1))
 
                 mean_nll = compute_laplace_nll(mean_wf, f_wf, mean_scale)
@@ -472,13 +546,11 @@ class Trainer:
                 waveform_objective = post_wf_loss + prior_wf_loss + prior_mean_anchor_loss
                 kl_ratio = compute_weighted_kl_ratio(float(w_init_kl.item()), float(w_path_kl.item()), float(waveform_objective.item()))
 
-                # Enforce max_weighted_kl_ratio <= 0.20 (Section 9.5 & 11.5)
                 if kl_ratio > self.config.loss.max_weighted_kl_ratio:
                     w_init_kl = w_init_kl * (self.config.loss.max_weighted_kl_ratio / max(1e-8, kl_ratio))
                     w_path_kl = w_path_kl * (self.config.loss.max_weighted_kl_ratio / max(1e-8, kl_ratio))
 
                 total_loss = post_wf_loss + prior_wf_loss + 0.5 * prior_mean_anchor_loss + w_init_kl + w_path_kl
-
 
             if self.use_amp:
                 self.scaler.scale(total_loss).backward()
@@ -629,8 +701,6 @@ class Trainer:
         start_stage = (start_stage or "A").upper()
 
         epochs_a = self.config.training.posterior_warmup_epochs
-        epochs_b = self.config.training.prior_alignment_epochs
-        epochs_c = self.config.training.forecast_refinement_epochs
         total_epoch = 0
 
         # Stage A Loop
@@ -665,60 +735,98 @@ class Trainer:
                         config=self.config,
                         record_splits=self.record_splits,
                     )
+            
+            # Check Stage A rhythm validation (Section 13)
+            final_val_m = self.evaluate()
+            self.stage_a_rhythm_validated = bool(final_val_m.get("post_rpeak_f1", 0.0) >= 0.85)
+            if self.stage_a_rhythm_validated:
+                print("[Trainer] Stage A rhythm validation PASSED (F1 >= 0.85). Stage B rhythm loss enabled.")
+            else:
+                print(f"[Trainer] Stage A rhythm validation F1={final_val_m.get('post_rpeak_f1', 0.0):.4f} < 0.85. Stage B rhythm loss disabled.")
         else:
             print(f"\n[Trainer] Skipping Stage A (Starting from Stage {start_stage})")
             total_epoch += epochs_a
 
-        # Stage B Loop
-        if start_stage in ["A", "B"]:
-            stage_a_ckpt = os.path.join(ckpt_dir, "posterior_warmup_best.pt")
-            if os.path.exists(stage_a_ckpt) and start_stage == "B":
-                print(f"\n[Trainer] Section 8.2: Reloading best Stage A checkpoint: {stage_a_ckpt}")
-                load_checkpoint(stage_a_ckpt, model=unwrapped, device=str(self.device))
-
-            print("\n=== Starting Stage B: Prior Alignment (Teacher-Student Training) ===")
-            self.optimizer = self.build_stage_b_optimizer()
-            best_stage_b_score = float("inf")
-
-            for epoch in range(epochs_b):
-                total_epoch += 1
-                train_m = self.train_stage_b_epoch(epoch_in_stage=epoch, total_stage_epochs=epochs_b)
-                vis_path = os.path.join(vis_dir, f"stage_B_epoch{epoch+1:02d}.png")
-                val_m = self.evaluate(save_vis_path=vis_path)
-
-                step_metrics = {**train_m, **val_m}
-                self.logger.log_summary("B", epoch + 1, step_metrics)
-                print(f"  [R-peak Detection] {int(val_m['zero_peaks_count'])} zero-peak forecasts out of val set ({val_m['zero_peaks_pct']:.1f}%)")
-                self.check_collapse_warnings(val_m)
-                self.logger.log(step_metrics, step=total_epoch)
-                self.logger.log_image("stage_B_visualization", vis_path, step=total_epoch)
-
-                if val_m["prior_forecast_score"] < best_stage_b_score:
-                    best_stage_b_score = val_m["prior_forecast_score"]
-                    save_checkpoint(
-                        path=os.path.join(ckpt_dir, "prior_alignment_best.pt"),
-                        model=unwrapped,
-                        optimizer=self.optimizer,
-                        epoch=epoch + 1,
-                        stage="B",
-                        metrics=val_m,
-                        global_step=self.global_step,
-                        config=self.config,
-                        record_splits=self.record_splits,
-                    )
+        # ALWAYS reload best Stage A checkpoint before Stage B (Section 11)
+        stage_a_ckpt = os.path.join(ckpt_dir, "posterior_warmup_best.pt")
+        if os.path.exists(stage_a_ckpt):
+            print(f"\n[Trainer] Section 11: Reloading best Stage A checkpoint: {stage_a_ckpt}")
+            load_checkpoint(stage_a_ckpt, model=unwrapped, device=str(self.device))
         else:
-            total_epoch += epochs_b
+            print(f"\n[Trainer] Warning: Best Stage A checkpoint {stage_a_ckpt} not found!")
 
-        # Stage C Loop
-        stage_b_ckpt = os.path.join(ckpt_dir, "prior_alignment_best.pt")
-        if os.path.exists(stage_b_ckpt) and start_stage == "C":
-            print(f"\n[Trainer] Section 9.2: Reloading best Stage B checkpoint: {stage_b_ckpt}")
+        # Stage B Loop with Horizon Curriculum (Section 14)
+        if start_stage in ["A", "B"]:
+            print("\n=== Starting Stage B: Prior Alignment with Horizon Curriculum ===")
+            self.optimizer = self.build_stage_b_optimizer()
+
+            curriculum = [
+                {"horizon_sec": 0.5, "epochs": 30, "ckpt_name": "prior_alignment_0p5s_best.pt"},
+                {"horizon_sec": 1.0, "epochs": 30, "ckpt_name": "prior_alignment_1p0s_best.pt"},
+                {"horizon_sec": 2.0, "epochs": 40, "ckpt_name": "prior_alignment_2p0s_best.pt"},
+            ]
+
+            for c_stage in curriculum:
+                h_sec = c_stage["horizon_sec"]
+                c_epochs = c_stage["epochs"]
+                c_ckpt = c_stage["ckpt_name"]
+                print(f"\n--- Stage B Curriculum Stage: {h_sec}s Horizon ({c_epochs} epochs) ---")
+
+                best_c_score = float("inf")
+                for epoch in range(c_epochs):
+                    total_epoch += 1
+                    train_m = self.train_stage_b_epoch(epoch_in_stage=epoch, total_stage_epochs=c_epochs, horizon_sec=h_sec)
+                    vis_path = os.path.join(vis_dir, f"stage_B_{h_sec}s_epoch{epoch+1:02d}.png")
+                    val_m = self.evaluate(save_vis_path=vis_path)
+
+                    step_metrics = {**train_m, **val_m}
+                    self.logger.log_summary("B", epoch + 1, step_metrics)
+                    print(f"  [{h_sec}s Horizon Epoch {epoch+1:02d}] Prior Pearson: {val_m['prior_pearson']:.4f} | R-peak F1: {val_m['prior_rpeak_f1']:.4f}")
+                    self.check_collapse_warnings(val_m)
+                    self.logger.log(step_metrics, step=total_epoch)
+
+                    if val_m["prior_forecast_score"] < best_c_score:
+                        best_c_score = val_m["prior_forecast_score"]
+                        save_checkpoint(
+                            path=os.path.join(ckpt_dir, c_ckpt),
+                            model=unwrapped,
+                            optimizer=self.optimizer,
+                            epoch=epoch + 1,
+                            stage="B",
+                            metrics=val_m,
+                            global_step=self.global_step,
+                            config=self.config,
+                            record_splits=self.record_splits,
+                        )
+
+                # Gate progression checks
+                val_m_curr = self.evaluate()
+                if h_sec == 0.5:
+                    if val_m_curr["prior_pearson"] < 0.60 or val_m_curr["prior_rpeak_f1"] < 0.60:
+                        print(f"\n❌ [Trainer] Curriculum Gate 0.5s->1.0s FAILED (Pearson={val_m_curr['prior_pearson']:.4f}, F1={val_m_curr['prior_rpeak_f1']:.4f}). Stopping Stage B curriculum.")
+                        break
+                elif h_sec == 1.0:
+                    if val_m_curr["prior_pearson"] < 0.55 or val_m_curr["prior_rpeak_f1"] < 0.55:
+                        print(f"\n❌ [Trainer] Curriculum Gate 1.0s->2.0s FAILED (Pearson={val_m_curr['prior_pearson']:.4f}, F1={val_m_curr['prior_rpeak_f1']:.4f}). Stopping Stage B curriculum.")
+                        break
+
+        # Check Stage C execution flag (Section 15)
+        run_stage_c = getattr(self.config.training, "run_stage_c", False)
+        if not run_stage_c:
+            print(f"\n[Trainer] Section 15: Stage C is disabled (run_stage_c: false). Deterministic forecasting setup complete.")
+            return
+
+        # Stage C Loop if explicitly enabled
+        stage_b_ckpt = os.path.join(ckpt_dir, "prior_alignment_2p0s_best.pt")
+        if os.path.exists(stage_b_ckpt):
+            print(f"\n[Trainer] Section 11: Reloading best Stage B checkpoint: {stage_b_ckpt}")
             load_checkpoint(stage_b_ckpt, model=unwrapped, device=str(self.device))
 
         print("\n=== Starting Stage C: Forecast Refinement (Joint Fine-Tuning) ===")
         self.optimizer = self.build_stage_c_optimizer()
         best_stage_c_score = float("inf")
 
+        epochs_c = self.config.training.forecast_refinement_epochs
         for epoch in range(epochs_c):
             total_epoch += 1
             train_m = self.train_stage_c_epoch(epoch_in_stage=epoch, total_stage_epochs=epochs_c)

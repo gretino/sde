@@ -13,6 +13,7 @@ artifacts/
 output/
 .agents/
 skills-lock.json
+DEBUG_COMMANDS.md
 data/
 # C extensions
 *.so

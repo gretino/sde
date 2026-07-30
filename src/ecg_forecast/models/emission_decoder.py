@@ -111,3 +111,8 @@ class EmissionDecoder(nn.Module):
         waveform_mean = wf_out.transpose(1, 2)         # [B, 200, num_leads]
 
         return waveform_mean, self.observation_scale
+
+
+# Alias for backward compatibility and testing
+WaveformDecoder = EmissionDecoder
+

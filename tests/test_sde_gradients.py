@@ -43,9 +43,11 @@ def test_sde_gradients_all_modules():
         "prior_drift": model.sde.sde_func.prior_drift_net[0].weight,
         "posterior_drift": model.sde.sde_func.posterior_drift_net[0].weight,
         "diffusion": model.sde.sde_func.raw_sigma,
-        "decoder_net": model.decoder.net[0].weight,
+        "decoder_net": model.decoder.proj_in.weight,
         "observation_scale": model.decoder.raw_obs_log_scale,
     }
+
+
 
     for name, param in modules_to_check.items():
         assert param.grad is not None, f"Gradient for {name} is None"

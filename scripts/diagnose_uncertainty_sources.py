@@ -19,8 +19,12 @@ def main():
     parser.add_argument("--checkpoint", type=str, required=True, help="Path to model checkpoint")
     parser.add_argument("--data_dir", type=str, default="data/incart")
     parser.add_argument("--num_samples", type=int, default=128)
+    parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
     parser.add_argument("--output_dir", type=str, default=None)
     args = parser.parse_args()
+
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"[Diagnose Uncertainty] Loading checkpoint: {args.checkpoint}")
@@ -47,34 +51,27 @@ def main():
         "mean": float(prior_logvar.mean().item()),
         "min": float(prior_logvar.min().item()),
         "max": float(prior_logvar.max().item()),
-        "fraction_clamped": float((prior_logvar <= -10.0).float().mean().item()),
+        "fraction_at_lower_clamp": float((prior_logvar <= -7.99).float().mean().item()),
     }
 
     n_samples = args.num_samples
-    horizon_sec = f_wf.size(1) / 100.0
-    t_latent = int(round(horizon_sec * 25))
-    ts = torch.linspace(0.04, horizon_sec, t_latent, device=device)
-    t_target = f_wf.size(1)
+    target_samples = f_wf.size(1)
+    
+    from ecg_forecast.utils.timegrid import make_latent_times
+    ts = make_latent_times(future_samples=target_samples, sampling_rate=100, latent_rate=25, device=device)
 
     # Expanded context summary for n_samples
     c_summary_rep = c_summary.repeat(n_samples, 1)
     p_mean_rep = prior_mean.repeat(n_samples, 1)
     p_logvar_rep = prior_logvar.repeat(n_samples, 1)
 
-    # 1. Initial-state variation only (sample z0, zero diffusion)
+    # 1. Initial-state variation only (sample z0, deterministic=True, no diffusion)
     z0_init_only = model._reparameterize(p_mean_rep, p_logvar_rep)
     with torch.no_grad():
-        # Temporarily force sigma to zero
-        raw_sigma_orig = model.sde.sde_func.raw_sigma.data.clone()
-        model.sde.sde_func.raw_sigma.data.fill_(-100.0)
-
         lat_init_only, _ = model.sde.integrate(
-            z0=z0_init_only, ts=ts, context_summary=c_summary_rep, mode="prior"
+            z0=z0_init_only, ts=ts, context_summary=c_summary_rep, mode="prior", deterministic=True
         )
-        wf_init_only, _ = model.decoder(lat_init_only, c_summary_rep, target_len=t_target)
-
-        # Restore original sigma
-        model.sde.sde_func.raw_sigma.data.copy_(raw_sigma_orig)
+        wf_init_only, _ = model.decoder(lat_init_only, c_summary_rep, target_len=target_samples)
 
     m_init_only = compute_uncertainty_debug_metrics(
         samples_waveform=wf_init_only,
@@ -82,13 +79,13 @@ def main():
         samples_latent=lat_init_only,
     )
 
-    # 2. Brownian variation only (z0 = mean, stochastic SDE)
+    # 2. Brownian variation only (z0 = exact mean, stochastic SDE, deterministic=False)
     z0_det = p_mean_rep
     with torch.no_grad():
         lat_brownian_only, _ = model.sde.integrate(
-            z0=z0_det, ts=ts, context_summary=c_summary_rep, mode="prior"
+            z0=z0_det, ts=ts, context_summary=c_summary_rep, mode="prior", deterministic=False
         )
-        wf_brownian_only, _ = model.decoder(lat_brownian_only, c_summary_rep, target_len=t_target)
+        wf_brownian_only, _ = model.decoder(lat_brownian_only, c_summary_rep, target_len=target_samples)
 
     m_brownian_only = compute_uncertainty_debug_metrics(
         samples_waveform=wf_brownian_only,
@@ -96,13 +93,12 @@ def main():
         samples_latent=lat_brownian_only,
     )
 
-    # 3. Combined variation (sample z0, stochastic SDE)
+    # 3. Combined variation (sample z0, stochastic SDE, deterministic=False)
     with torch.no_grad():
         lat_combined, _ = model.sde.integrate(
-            z0=z0_init_only, ts=ts, context_summary=c_summary_rep, mode="prior"
+            z0=z0_init_only, ts=ts, context_summary=c_summary_rep, mode="prior", deterministic=False
         )
-        wf_combined, _ = model.decoder(lat_combined, c_summary_rep, target_len=t_target)
-
+        wf_combined, _ = model.decoder(lat_combined, c_summary_rep, target_len=target_samples)
 
     m_combined = compute_uncertainty_debug_metrics(
         samples_waveform=wf_combined,
@@ -112,8 +108,8 @@ def main():
 
     # Interpretation
     interpretation = []
-    if prior_logvar_stats["mean"] < -6.0:
-        interpretation.append("CRITICAL: prior log-variance has collapsed")
+    if prior_logvar_stats["fraction_at_lower_clamp"] > 0.50:
+        interpretation.append("CRITICAL: prior log-variance has collapsed to lower clamp (-8.0)")
     if m_init_only["latent_variance_retention"] < 0.10:
         interpretation.append("prior drift is strongly contracting (erases initial sample diversity)")
     if m_combined["latent_zT_sample_var"] > 0.05 and m_combined["mean_waveform_sample_std"] < 0.01:
@@ -121,6 +117,7 @@ def main():
 
     summary_data = {
         "checkpoint": args.checkpoint,
+        "seed": args.seed,
         "num_samples": n_samples,
         "prior_logvar_stats": prior_logvar_stats,
         "initial_state_variation_only": m_init_only,
