@@ -31,3 +31,6 @@ def test_stage_b_freeze_exact_modules():
 
     for name, p in model.context_encoder.fc_logvar.named_parameters():
         assert not p.requires_grad, f"context_encoder.fc_logvar parameter {name} should be frozen!"
+
+    for name, p in model.rhythm_head.named_parameters():
+        assert not p.requires_grad, f"rhythm_head parameter {name} was unexpectedly unfrozen in Stage B!"

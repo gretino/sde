@@ -1,6 +1,11 @@
 torch
-torchdiffeq
-torchcde
+torchsde
+wfdb
+numpy
+scipy
+pyyaml
+tqdm
+wandb
 neurokit2
+matplotlib
 pytest
-python-dotenv

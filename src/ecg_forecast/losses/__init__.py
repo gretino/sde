@@ -1,5 +1,11 @@
 from .elbo import compute_laplace_nll, compute_elbo_loss
-from .morphology import compute_derivative_loss, compute_spectral_loss, compute_morphology_loss
+from .morphology import (
+    compute_derivative_loss,
+    compute_spectral_loss,
+    compute_morphology_loss,
+    compute_rhythm_loss,
+    create_soft_rpeak_target,
+)
 from .schedules import get_loss_weights
 
 __all__ = [
@@ -8,5 +14,7 @@ __all__ = [
     "compute_derivative_loss",
     "compute_spectral_loss",
     "compute_morphology_loss",
+    "compute_rhythm_loss",
+    "create_soft_rpeak_target",
     "get_loss_weights",
 ]

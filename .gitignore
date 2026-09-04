@@ -4,17 +4,29 @@ __pycache__/
 *$py.class
 GEMINI.md
 CONTEXT.md
-cache/
-verification_results/
-wandb/
-checkpoints/
-artifacts/
+/cache/
+/verification_results/
+/wandb/
+/checkpoints/
+/artifacts/
+!/artifacts/splits/
 *.pt
-output/
+/output/
 .agents/
 skills-lock.json
 DEBUG_COMMANDS.md
-data/
+/data/
+
+# OS artifacts
+.DS_Store
+Thumbs.db
+
+# IDE & Editor
+.idea/
+*.swp
+*.swo
+.vscode/*
+!.vscode/settings.json
 # C extensions
 *.so
 # Distribution / packaging
