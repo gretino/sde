@@ -152,3 +152,77 @@ def compute_rhythm_metrics(
         "total_samples": float(b),
         "zero_peak_pct": float(zero_peak_count / max(1, b) * 100.0),
     }
+
+
+def compute_cnsde_rhythm_metrics(
+    waveform_samples: torch.Tensor,
+    target_r_peaks_list: Optional[List[torch.Tensor]] = None,
+    ground_truth: Optional[torch.Tensor] = None,
+    sampling_rate: int = 100,
+    lead_idx: int = 0,
+) -> Dict[str, float]:
+    """Computes Section 14 ECG rhythm diagnostics over [B, K, L, C] generated samples.
+
+    Evaluates:
+      - R-peak count per sample
+      - fraction of samples with zero detected R-peaks
+      - heart-rate distribution (mean, std)
+      - ground-truth heart rate
+      - nearest R-peak timing error (ms)
+    """
+    B, K, L, C = waveform_samples.shape
+    wf_np = waveform_samples.detach().cpu().numpy()
+
+    peak_counts = []
+    zero_peak_count = 0
+    total_sample_runs = B * K
+    sample_hrs = []
+    gt_hrs = []
+    timing_errors_ms = []
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        for b in range(B):
+            # Target peaks
+            tgt_peaks = np.array([], dtype=np.int64)
+            if target_r_peaks_list is not None and b < len(target_r_peaks_list):
+                t_p = target_r_peaks_list[b]
+                tgt_peaks = t_p.cpu().numpy() if isinstance(t_p, torch.Tensor) else np.array(t_p)
+            elif ground_truth is not None:
+                tgt_sig = ground_truth[b, :, lead_idx].detach().cpu().numpy()
+                tgt_peaks = detect_r_peaks_lead(tgt_sig, sampling_rate=sampling_rate)
+
+            if len(tgt_peaks) >= 2:
+                gt_hr, _ = compute_hr_rmssd(tgt_peaks, sampling_rate=sampling_rate)
+                if gt_hr > 0:
+                    gt_hrs.append(gt_hr)
+
+            for k in range(K):
+                sig = wf_np[b, k, :, lead_idx]
+                pred_peaks = detect_r_peaks_lead(sig, sampling_rate=sampling_rate)
+                num_p = len(pred_peaks)
+                peak_counts.append(num_p)
+
+                if num_p == 0:
+                    zero_peak_count += 1
+                else:
+                    if num_p >= 2:
+                        p_hr, _ = compute_hr_rmssd(pred_peaks, sampling_rate=sampling_rate)
+                        if p_hr > 0:
+                            sample_hrs.append(p_hr)
+
+                    if len(tgt_peaks) > 0:
+                        # Nearest R-peak timing error
+                        for p in pred_peaks:
+                            diff_ms = float(np.min(np.abs(tgt_peaks - p))) / sampling_rate * 1000.0
+                            timing_errors_ms.append(diff_ms)
+
+    return {
+        "rpeak_count_mean": float(np.mean(peak_counts)) if peak_counts else 0.0,
+        "zero_rpeak_fraction": float(zero_peak_count / max(1, total_sample_runs)),
+        "zero_rpeak_pct": float(zero_peak_count / max(1, total_sample_runs) * 100.0),
+        "sample_hr_mean": float(np.mean(sample_hrs)) if sample_hrs else 0.0,
+        "sample_hr_std": float(np.std(sample_hrs)) if sample_hrs else 0.0,
+        "ground_truth_hr_mean": float(np.mean(gt_hrs)) if gt_hrs else 0.0,
+        "nearest_rpeak_timing_error_ms": float(np.mean(timing_errors_ms)) if timing_errors_ms else 0.0,
+    }

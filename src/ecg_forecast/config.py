@@ -8,8 +8,7 @@ import yaml
 class DataConfig:
     dataset_name: str = "incart"
     data_dir: str = "data/incart"
-    num_leads: int = 12
-    lead_indices: Optional[List[int]] = None
+    leads: List[int] = field(default_factory=lambda: [1])
     sampling_rate: int = 100
     context_seconds: float = 5.0
     future_seconds: float = 2.0
@@ -21,8 +20,9 @@ class DataConfig:
         self,
         dataset_name: str = "incart",
         data_dir: str = "data/incart",
-        num_leads: int = 12,
+        leads: Optional[List[int]] = None,
         lead_indices: Optional[List[int]] = None,
+        num_leads: Optional[int] = None,
         sampling_rate: int = 100,
         context_seconds: Optional[float] = None,
         context_duration: Optional[float] = None,
@@ -36,8 +36,16 @@ class DataConfig:
     ):
         self.dataset_name = dataset_name
         self.data_dir = data_dir
-        self.num_leads = num_leads
-        self.lead_indices = lead_indices
+
+        if leads is not None:
+            self.leads = list(leads)
+        elif lead_indices is not None:
+            self.leads = list(lead_indices)
+        elif num_leads is not None and num_leads != 12:
+            self.leads = list(range(num_leads))
+        else:
+            self.leads = [1]
+
         self.sampling_rate = sampling_rate
 
         ctx = context_seconds if context_seconds is not None else (context_duration if context_duration is not None else 5.0)
@@ -47,9 +55,16 @@ class DataConfig:
         self.context_seconds = float(ctx)
         self.future_seconds = float(fut)
         self.stride_seconds = float(std)
-
         self.split_seed = split_seed
         self.cache_dir = cache_dir
+
+    @property
+    def lead_indices(self) -> List[int]:
+        return self.leads
+
+    @property
+    def num_leads(self) -> int:
+        return len(self.leads)
 
     @property
     def context_duration(self) -> float:
@@ -77,221 +92,235 @@ class DataConfig:
 
 
 @dataclass
+class SignatureConfig:
+    depth: int = 4
+    dyadic_depth: int = 2
+    lead_lag: bool = True
+    normalize: bool = True
+    normalize_features: bool = True
+    ridge_alpha: float = 0.1
+    signatures_dir: str = "artifacts/signatures"
+
+    def __init__(
+        self,
+        depth: int = 4,
+        dyadic_depth: int = 2,
+        lead_lag: bool = True,
+        normalize: bool = True,
+        normalize_features: Optional[bool] = None,
+        ridge_alpha: float = 0.1,
+        signatures_dir: str = "artifacts/signatures",
+        **kwargs,
+    ):
+        self.depth = depth
+        self.dyadic_depth = dyadic_depth
+        self.lead_lag = lead_lag
+        self.normalize = normalize
+        self.normalize_features = normalize_features if normalize_features is not None else normalize
+        self.ridge_alpha = ridge_alpha
+        self.signatures_dir = signatures_dir
+
+
+@dataclass
 class ModelConfig:
-    latent_dim: int = 32
-    context_dim: int = 128
-    num_leads: int = 12
+    context_dim: int = 64
+    initial_noise_dim: int = 16
+    latent_dim: int = 64
+    drift_hidden: List[int] = field(default_factory=lambda: [128, 128, 128])
+    diffusion_hidden: List[int] = field(default_factory=lambda: [128, 128, 128])
+    sigma_min: float = 0.005
+    sigma_max: float = 0.20
+    num_leads: int = 1
+
+    def __init__(
+        self,
+        context_dim: int = 64,
+        initial_noise_dim: int = 16,
+        latent_dim: int = 64,
+        drift_hidden: Optional[List[int]] = None,
+        diffusion_hidden: Optional[List[int]] = None,
+        sigma_min: float = 0.005,
+        sigma_max: float = 0.20,
+        num_leads: int = 1,
+        **kwargs,
+    ):
+        self.context_dim = context_dim
+        self.initial_noise_dim = initial_noise_dim
+        self.latent_dim = latent_dim
+        self.drift_hidden = list(drift_hidden) if drift_hidden is not None else [128, 128, 128]
+        self.diffusion_hidden = list(diffusion_hidden) if diffusion_hidden is not None else [128, 128, 128]
+        self.sigma_min = sigma_min
+        self.sigma_max = sigma_max
+        self.num_leads = num_leads
+
+
+@dataclass
+class SDEConfig:
+    type: str = "stratonovich"
+    noise_type: str = "diagonal"
+    method: str = "reversible_heun"
+    adjoint_method: str = "adjoint_reversible_heun"
     dt: float = 0.01
-    latent_rate: int = 25
 
-    @property
-    def future_latent_steps(self) -> int:
-        return int(round(2.0 * self.latent_rate))
-
-
-@dataclass
-class LossConfig:
-    beta_initial: float = 1.0
-    beta_path: float = 1.0
-    lambda_derivative: float = 0.5
-    lambda_spectral: float = 0.1
-    lambda_rhythm: float = 0.5
-    lambda_trajectory: float = 1.0
-    lambda_z0: float = 0.1
-    lambda_drift: float = 0.01
-    stage_b_initial_teacher_weight: float = 0.1
-    stage_b_drift_teacher_weight: float = 0.01
-    stage_c_initial_kl_start: float = 1e-5
-    stage_c_initial_kl_max: float = 1e-2
-    stage_c_path_kl_start: float = 1e-6
-    stage_c_path_kl_max: float = 1e-3
-    kl_ramp_epochs: int = 20
-    max_weighted_kl_ratio: float = 0.20
-    forecast_horizon_curriculum: List[float] = field(default_factory=lambda: [0.5, 1.0, 2.0])
-
-
-
-@dataclass
-class StabilityConfig:
-    fixed_diffusion_stage_a_b: float = 0.01
-    diffusion_min_stage_c: float = 0.005
-    diffusion_max_stage_c: float = 0.05
-    fixed_observation_scale_stage_a_b: float = 0.10
-    observation_scale_min_stage_c: float = 0.03
-    observation_scale_max_stage_c: float = 0.30
+    def __init__(
+        self,
+        type: str = "stratonovich",
+        noise_type: str = "diagonal",
+        method: str = "reversible_heun",
+        adjoint_method: str = "adjoint_reversible_heun",
+        dt: float = 0.01,
+        **kwargs,
+    ):
+        self.type = type
+        self.noise_type = noise_type
+        self.method = method
+        self.adjoint_method = adjoint_method
+        self.dt = dt
 
 
 @dataclass
 class TrainingConfig:
-    batch_size: int = 32
-    learning_rate: float = 3e-4
-    stage_a_learning_rate: float = 3e-4
-    stage_b_prior_learning_rate: float = 3e-4
-    stage_b_context_learning_rate: float = 1e-5
-    stage_c_prior_learning_rate: float = 1e-4
-    stage_c_shared_learning_rate: float = 1e-5
-    stage_c_diffusion_learning_rate: float = 1e-6
-    weight_decay: float = 1e-4
-    clip_grad: float = 1.0
-    posterior_warmup_epochs: int = 20
-    prior_alignment_epochs: int = 50
-    forecast_refinement_epochs: int = 20
-    num_workers: int = 0
+    batch_size: int = 64
+    num_samples: int = 8
+    monte_carlo_samples: int = 8
+    learning_rate: float = 0.001
+    weight_decay: float = 0.0001
+    grad_clip: float = 1.0
     mixed_precision: bool = False
-    prior_samples_eval: int = 16
-    use_wandb: bool = True
-    wandb_project: str = "ecg-natural-dynamics"
-    run_name: Optional[str] = None
+    epochs: int = 50
     seed: int = 42
-    checkpoint_dir: str = "checkpoints/incart_12lead"
+    num_workers: int = 0
+    use_wandb: bool = False
+    wandb_project: str = "cnsde-ecg-forecasting"
+    run_name: Optional[str] = None
+    checkpoint_dir: str = "checkpoints/lead2_cnsde"
 
     def __init__(
         self,
-        batch_size: int = 32,
+        batch_size: int = 64,
+        num_samples: Optional[int] = None,
+        monte_carlo_samples: Optional[int] = None,
         learning_rate: Optional[float] = None,
         lr: Optional[float] = None,
-        stage_a_learning_rate: Optional[float] = None,
-        stage_b_prior_learning_rate: Optional[float] = None,
-        stage_b_context_learning_rate: Optional[float] = None,
-        stage_c_prior_learning_rate: Optional[float] = None,
-        stage_c_shared_learning_rate: Optional[float] = None,
-        stage_c_diffusion_learning_rate: Optional[float] = None,
-        weight_decay: float = 1e-4,
-        clip_grad: float = 1.0,
-        posterior_warmup_epochs: Optional[int] = None,
-        epochs_stage_a: Optional[int] = None,
-        prior_alignment_epochs: Optional[int] = None,
-        epochs_stage_b: Optional[int] = None,
-        forecast_refinement_epochs: Optional[int] = None,
-        epochs_stage_c: Optional[int] = None,
-        num_workers: int = 0,
+        weight_decay: float = 0.0001,
+        grad_clip: float = 1.0,
+        clip_grad: Optional[float] = None,
         mixed_precision: bool = False,
-        prior_samples_eval: int = 16,
-        use_wandb: bool = True,
-        wandb_project: str = "ecg-natural-dynamics",
-        run_name: Optional[str] = None,
-        wandb_run_name: Optional[str] = None,
+        epochs: int = 50,
         seed: int = 42,
-        checkpoint_dir: str = "checkpoints/incart_12lead",
+        num_workers: int = 0,
+        use_wandb: bool = False,
+        wandb_project: str = "cnsde-ecg-forecasting",
+        run_name: Optional[str] = None,
+        checkpoint_dir: str = "checkpoints/lead2_cnsde",
         **kwargs,
     ):
         self.batch_size = batch_size
-        self.learning_rate = learning_rate if learning_rate is not None else (lr if lr is not None else 3e-4)
-        self.stage_a_learning_rate = stage_a_learning_rate if stage_a_learning_rate is not None else self.learning_rate
-        self.stage_b_prior_learning_rate = stage_b_prior_learning_rate if stage_b_prior_learning_rate is not None else self.learning_rate
-        self.stage_b_context_learning_rate = stage_b_context_learning_rate if stage_b_context_learning_rate is not None else 1e-5
-        self.stage_c_prior_learning_rate = stage_c_prior_learning_rate if stage_c_prior_learning_rate is not None else 1e-4
-        self.stage_c_shared_learning_rate = stage_c_shared_learning_rate if stage_c_shared_learning_rate is not None else 1e-5
-        self.stage_c_diffusion_learning_rate = stage_c_diffusion_learning_rate if stage_c_diffusion_learning_rate is not None else 1e-6
-
+        mc = num_samples if num_samples is not None else (monte_carlo_samples if monte_carlo_samples is not None else 8)
+        self.num_samples = mc
+        self.monte_carlo_samples = mc
+        self.learning_rate = learning_rate if learning_rate is not None else (lr if lr is not None else 0.001)
         self.weight_decay = weight_decay
-        self.clip_grad = clip_grad
-
-        self.posterior_warmup_epochs = posterior_warmup_epochs if posterior_warmup_epochs is not None else (epochs_stage_a if epochs_stage_a is not None else 20)
-        self.prior_alignment_epochs = prior_alignment_epochs if prior_alignment_epochs is not None else (epochs_stage_b if epochs_stage_b is not None else 50)
-        self.forecast_refinement_epochs = forecast_refinement_epochs if forecast_refinement_epochs is not None else (epochs_stage_c if epochs_stage_c is not None else 20)
-
-        self.num_workers = num_workers
+        self.grad_clip = grad_clip if grad_clip is not None else (clip_grad if clip_grad is not None else 1.0)
         self.mixed_precision = mixed_precision
-        self.prior_samples_eval = prior_samples_eval
-        self.use_wandb = use_wandb
+        self.epochs = epochs
         self.seed = seed
+        self.num_workers = num_workers
+        self.use_wandb = use_wandb
+        self.wandb_project = wandb_project
+        self.run_name = run_name
         self.checkpoint_dir = checkpoint_dir
-
-    @property
-    def max_grad_norm(self) -> float:
-        return self.clip_grad
-
 
     @property
     def lr(self) -> float:
         return self.learning_rate
 
-    @property
-    def epochs_stage_a(self) -> int:
-        return self.posterior_warmup_epochs
 
-    @property
-    def epochs_stage_b(self) -> int:
-        return self.prior_alignment_epochs
+@dataclass
+class ValidationConfig:
+    num_samples: int = 32
+    monte_carlo_samples: int = 32
 
-    @property
-    def epochs_stage_c(self) -> int:
-        return self.forecast_refinement_epochs
+    def __init__(
+        self,
+        num_samples: Optional[int] = None,
+        monte_carlo_samples: Optional[int] = None,
+        **kwargs,
+    ):
+        val_mc = num_samples if num_samples is not None else (monte_carlo_samples if monte_carlo_samples is not None else 32)
+        self.num_samples = val_mc
+        self.monte_carlo_samples = val_mc
 
 
 @dataclass
 class Config:
     data: DataConfig = field(default_factory=DataConfig)
+    signature: SignatureConfig = field(default_factory=SignatureConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
-    loss: LossConfig = field(default_factory=LossConfig)
+    sde: SDEConfig = field(default_factory=SDEConfig)
     training: TrainingConfig = field(default_factory=TrainingConfig)
-    stability: StabilityConfig = field(default_factory=StabilityConfig)
+    validation: ValidationConfig = field(default_factory=ValidationConfig)
 
 
-def load_config(yaml_path: str) -> Config:
-    with open(yaml_path, "r") as f:
-        cfg_dict = yaml.safe_load(f) or {}
+def load_config(yaml_input: Any) -> Config:
+    if isinstance(yaml_input, Config):
+        return yaml_input
 
-    default_name = os.path.splitext(os.path.basename(yaml_path))[0]
+    if isinstance(yaml_input, dict):
+        cfg_dict = yaml_input
+        default_name = "lead2_cnsde"
+    elif hasattr(yaml_input, "read"):
+        cfg_dict = yaml.safe_load(yaml_input) or {}
+        default_name = "lead2_cnsde"
+    else:
+        with open(yaml_input, "r") as f:
+            cfg_dict = yaml.safe_load(f) or {}
+        default_name = os.path.splitext(os.path.basename(yaml_input))[0]
 
     data_raw = cfg_dict.get("data", {})
+    sig_raw = cfg_dict.get("signature", {})
     model_raw = cfg_dict.get("model", {})
-    loss_raw = cfg_dict.get("loss", {})
+    sde_raw = cfg_dict.get("sde", {})
     train_raw = cfg_dict.get("training", {})
-    stability_raw = cfg_dict.get("stability", {})
-
-    if not any(k in cfg_dict for k in ["data", "model", "loss", "training", "stability"]):
-        data_raw = {
-            "dataset_name": cfg_dict.get("dataset_name", "incart"),
-            "data_dir": cfg_dict.get("data_dir", "data/incart"),
-            "num_leads": len(cfg_dict.get("lead_indices", list(range(12)))) if cfg_dict.get("lead_indices") is not None else 12,
-            "lead_indices": cfg_dict.get("lead_indices"),
-            "sampling_rate": cfg_dict.get("sampling_rate", 100),
-            "context_seconds": cfg_dict.get("context_seconds", 5.0),
-            "future_seconds": cfg_dict.get("future_seconds", 2.0),
-            "stride_seconds": cfg_dict.get("stride_seconds", 1.0),
-            "split_seed": cfg_dict.get("seed", 42),
-            "cache_dir": cfg_dict.get("cache_dir", "cache/preprocessed"),
-        }
-        model_raw = {
-            "latent_dim": cfg_dict.get("latent_dim", 32),
-            "context_dim": cfg_dict.get("context_dim", 128),
-            "num_leads": data_raw["num_leads"],
-            "dt": cfg_dict.get("dt", 0.01),
-            "latent_rate": cfg_dict.get("latent_rate", 25),
-        }
-        train_raw = {
-            "batch_size": cfg_dict.get("batch_size", 32),
-            "learning_rate": cfg_dict.get("learning_rate", 3e-4),
-            "weight_decay": cfg_dict.get("weight_decay", 1e-4),
-            "clip_grad": cfg_dict.get("clip_grad", 1.0),
-            "posterior_warmup_epochs": cfg_dict.get("posterior_warmup_epochs", 20),
-            "prior_alignment_epochs": cfg_dict.get("prior_alignment_epochs", 50),
-            "forecast_refinement_epochs": cfg_dict.get("forecast_refinement_epochs", 20),
-            "num_workers": cfg_dict.get("num_workers", 0),
-            "mixed_precision": cfg_dict.get("mixed_precision", False),
-            "prior_samples_eval": cfg_dict.get("prior_samples_eval", 16),
-            "use_wandb": cfg_dict.get("use_wandb", True),
-            "wandb_project": cfg_dict.get("wandb_project", "ecg-natural-dynamics"),
-            "run_name": cfg_dict.get("run_name", cfg_dict.get("wandb_run_name", default_name)),
-            "seed": cfg_dict.get("seed", 42),
-            "checkpoint_dir": cfg_dict.get("checkpoint_dir", "checkpoints/incart_12lead"),
-        }
-
-    if "run_name" not in train_raw and "wandb_run_name" not in train_raw:
-        train_raw["run_name"] = default_name
+    val_raw = cfg_dict.get("validation", {})
 
     data_cfg = DataConfig(**data_raw)
+    sig_cfg = SignatureConfig(**sig_raw)
+    
+    # Propagate num_leads to model config if not explicitly set
+    if "num_leads" not in model_raw:
+        model_raw["num_leads"] = data_cfg.num_leads
     model_cfg = ModelConfig(**model_raw)
-    loss_cfg = LossConfig(**loss_raw)
-    training_cfg = TrainingConfig(**train_raw)
-    stability_cfg = StabilityConfig(**stability_raw)
+    
+    sde_cfg = SDEConfig(**sde_raw)
+
+    if "run_name" not in train_raw:
+        train_raw["run_name"] = default_name
+    train_cfg = TrainingConfig(**train_raw)
+    val_cfg = ValidationConfig(**val_raw)
 
     return Config(
         data=data_cfg,
+        signature=sig_cfg,
         model=model_cfg,
-        loss=loss_cfg,
-        training=training_cfg,
-        stability=stability_cfg,
+        sde=sde_cfg,
+        training=train_cfg,
+        validation=val_cfg,
     )
+
+
+# Attempt to register PyTorch 2.6+ safe globals so unpickling Config works seamlessly
+try:
+    import torch
+    if hasattr(torch.serialization, "add_safe_globals"):
+        torch.serialization.add_safe_globals([
+            Config,
+            DataConfig,
+            SignatureConfig,
+            ModelConfig,
+            SDEConfig,
+            TrainingConfig,
+            ValidationConfig,
+        ])
+except Exception:
+    pass

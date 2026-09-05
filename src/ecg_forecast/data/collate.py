@@ -20,7 +20,7 @@ def ecg_collate_fn(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
 
     future_r_peaks = [b["future_r_peaks"] for b in batch]
 
-    return {
+    out = {
         "record_ids": record_ids,
         "context_waveform": context_waveform,
         "future_waveform": future_waveform,
@@ -32,3 +32,12 @@ def ecg_collate_fn(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
         "normalization_std": normalization_std,
         "future_r_peaks": future_r_peaks,
     }
+
+    if "context_signature" in batch[0]:
+        out["context_signature"] = torch.stack([b["context_signature"] for b in batch], dim=0)
+    if "conditional_future_signature" in batch[0]:
+        out["conditional_future_signature"] = torch.stack([b["conditional_future_signature"] for b in batch], dim=0)
+    if "true_future_signature" in batch[0]:
+        out["true_future_signature"] = torch.stack([b["true_future_signature"] for b in batch], dim=0)
+
+    return out

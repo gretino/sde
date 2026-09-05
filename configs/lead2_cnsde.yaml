@@ -1,0 +1,48 @@
+data:
+  sampling_rate: 100
+  context_seconds: 5.0
+  future_seconds: 2.0
+  stride_seconds: 1.0
+  leads: [1]
+
+signature:
+  depth: 4
+  dyadic_depth: 2
+  lead_lag: true
+  normalize: true
+  ridge_alpha: 0.1
+
+model:
+  context_dim: 64
+  initial_noise_dim: 16
+  latent_dim: 64
+
+  drift_hidden:
+    - 128
+    - 128
+    - 128
+
+  diffusion_hidden:
+    - 128
+    - 128
+    - 128
+
+  sigma_min: 0.005
+  sigma_max: 0.20
+
+sde:
+  type: stratonovich
+  noise_type: diagonal
+  method: reversible_heun
+  dt: 0.01
+
+training:
+  batch_size: 64
+  num_samples: 8
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  grad_clip: 1.0
+  mixed_precision: false
+
+validation:
+  num_samples: 32

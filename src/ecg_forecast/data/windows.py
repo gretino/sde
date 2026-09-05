@@ -162,3 +162,40 @@ class ECGWindowDataset(Dataset):
             "normalization_std": std,
             "future_r_peaks": future_r_peaks_tensor,
         }
+
+
+class SignatureECGDataset(Dataset):
+    """Wraps ECGWindowDataset and attaches precomputed signatures (context & conditional target)."""
+
+    def __init__(
+        self,
+        config: DataConfig,
+        split: str = "train",
+        signatures_dir: str = "artifacts/signatures",
+    ):
+        self.base_dataset = ECGWindowDataset(config=config, split=split)
+        self.split = split
+        sig_file = os.path.join(signatures_dir, f"{split}_signatures.pt")
+        if os.path.exists(sig_file):
+            try:
+                self.signatures = torch.load(sig_file, map_location="cpu", weights_only=False)
+            except TypeError:
+                self.signatures = torch.load(sig_file, map_location="cpu")
+        else:
+            self.signatures = None
+
+    def __len__(self) -> int:
+        if self.signatures is not None:
+            return min(len(self.base_dataset), len(self.signatures["context_signature"]))
+        return len(self.base_dataset)
+
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
+        item = self.base_dataset[idx]
+        if self.signatures is not None:
+            item["context_signature"] = self.signatures["context_signature"][idx]
+            item["conditional_future_signature"] = self.signatures["conditional_future_signature"][idx]
+            if "true_future_signature" in self.signatures:
+                item["true_future_signature"] = self.signatures["true_future_signature"][idx]
+        return item
+
+
